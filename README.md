@@ -10,9 +10,9 @@
 [![Mentioned in Awesome MCP Servers](https://awesome.re/mentioned-badge.svg)](https://github.com/punkpeye/awesome-mcp-servers)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](https://github.com/PsChina/deepseek-as-subagent)
 
-> Run DeepSeek as a **real sub-agent** inside Claude Code / Codex CLI — not just an LLM endpoint.
+> Run DeepSeek — or your own OpenAI-compatible local model — as a **real sub-agent** inside Claude Code / Codex CLI.
 > The host agent keeps the main conversation, planning, judgment, and verification.
-> DeepSeek gets its own agent loop for execution-heavy work.
+> The selected model gets its own agent loop for execution-heavy work.
 > Coding APIs use workspace-scoped writes and bounded trusted-host Bash; separate read-only APIs provide pure file analysis without command execution.
 
 ### Full coding delegation
@@ -27,7 +27,7 @@
                                                ├─ cancel_deepseek(job_id)
                                                └─ get_deepseek_result(job_id)
          ▼
-       DeepSeek coding sub-agent
+       Configured-model coding sub-agent
          │  Read / Write / Edit / Bash / Glob / Grep / NotebookEdit
          │  autonomously reads, modifies, runs, and tests in the workspace
          ▼
@@ -50,7 +50,7 @@ credential-isolated, but it is not an OS sandbox.
                                                         ├─ cancel_deepseek(job_id)
                                                         └─ get_deepseek_result(job_id)
          ▼
-       DeepSeek read-only sub-agent
+       Configured-model read-only sub-agent
          │  Read / Glob / Grep
          │  autonomously reads, searches, reviews, and performs static analysis
          ▼
@@ -74,10 +74,11 @@ protected generation copies of the skill + `/ds` slash command. It does not
 modify shell startup files. Helper deployment is best-effort after the core MCP
 registration commits; a foreign destination is preserved and reported.
 
-After install, edit `~/.deepseek-mcp/config.json` to paste your DeepSeek API
-key on POSIX, or set `DEEPSEEK_API_KEY` on Windows (get one at
-[platform.deepseek.com](https://platform.deepseek.com)). Then
-run `claude` and try `/ds inspect this workspace and summarize its structure`.
+For DeepSeek's hosted API, configure a key in `~/.deepseek-mcp/config.json` on
+POSIX or set `DEEPSEEK_API_KEY` on Windows (get one at
+[platform.deepseek.com](https://platform.deepseek.com)). A local loopback
+OpenAI-compatible server does not need a DeepSeek key. Then run `claude` and
+try `/ds inspect this workspace and summarize its structure`.
 
 To upgrade, fetch and inspect an explicit tag or commit, then re-run the local
 installer. Coding always uses `trusted_host`; read-only APIs need neither Bash
@@ -88,10 +89,10 @@ Codex or other MCP clients, see [Install](#install) below.
 
 Most `deepseek-mcp-server` projects expose DeepSeek as a **single LLM call** (`create_chat_completion`, `create_anthropic_message`). The host has to read every file itself and feed content into the prompt — DeepSeek only saves the "thinking" cost, not the "reading/writing" cost.
 
-This project gives DeepSeek **its own agent loop**: tool dispatch, file I/O,
-optional command execution for coding, and multi-turn reasoning against the
-configured workspace. The host hands off a complete logical unit and gets a
-result back. Token savings are end-to-end.
+This project gives the configured model **its own agent loop**: tool dispatch,
+file I/O, optional command execution for coding, and multi-turn reasoning
+against the configured workspace. The host hands off a complete logical unit
+and gets a result back. Token savings are end-to-end.
 
 ## What's in the box
 
@@ -99,7 +100,7 @@ result back. Token savings are end-to-end.
 - **Coding and read-only delegation**: `delegate_to_deepseek` / `delegate_to_deepseek_readonly`
 - **Steerable background jobs**: `start_deepseek` / `start_deepseek_readonly` plus shared controls
 - **Flash / Pro model routing**: host chooses a stable profile; users control the actual provider model IDs in config
-- **Local DeepSeek agent loop** (`agent_loop.py`) with OpenAI-compatible function calling
+- **Local coding agent loop** (`agent_loop.py`) with OpenAI-compatible tool calling
 - **Fixed capability APIs**: coding gets Read / Write / Edit / Bash / Glob / Grep / NotebookEdit; read-only gets Read / Glob / Grep
 - **Bash execution**: bounded credential-isolated trusted-host commands through the tool-child boundary
 - **Workspace path boundary** for file tools, with outbound symlinks rejected
@@ -115,8 +116,7 @@ The four delegation entry points accept one additive optional argument,
 to the Flash profile. Background-job and recovery tools remain additive.
 Mutation-capable legacy hosts must adopt the recovery query/verify/ack handshake
 before starting another delegation; read-only use needs no change.
-Clients should not parse health/error text byte-for-byte because diagnostics are now more specific. Provider calls still
-use DeepSeek's [OpenAI-compatible Chat Completions API](https://api-docs.deepseek.com/api/create-chat-completion/).
+Clients should not parse health/error text byte-for-byte because diagnostics are now more specific. Provider calls use an OpenAI-compatible Chat Completions API, including DeepSeek's [compatible endpoint](https://api-docs.deepseek.com/api/create-chat-completion/).
 Local Python module signatures are implementation details rather than a stable
 public API.
 
@@ -256,13 +256,16 @@ Sweet spot:
 │    ├─ synchronous delegate                                      │
 │    └─ steerable background job manager                          │
 │         ↓                                                       │
-│       DeepSeek agent loop + selected fixed-capability tools     │
-│    ↓ HTTPS                                                      │
-│  api.deepseek.com                                               │
+│       coding agent loop + selected fixed-capability tools       │
+│    ↓ configured OpenAI-compatible API                          │
+│  DeepSeek API or a local endpoint                               │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-No third-party proxy or cloud relay is introduced by this project. Delegated prompts and tool/file outputs selected by the agent are sent to the configured DeepSeek-compatible API, so only delegate data that endpoint is permitted to receive.
+No third-party proxy or cloud relay is introduced by this project. Delegated
+prompts and tool/file outputs selected by the agent are sent to the configured
+OpenAI-compatible API, so only delegate data that endpoint is permitted to
+receive.
 
 ## Configuration
 
@@ -275,7 +278,7 @@ No third-party proxy or cloud relay is introduced by this project. Delegated pro
   "flash_reasoning_effort": "high",
   "pro": "deepseek-v4-pro",
   "pro_reasoning_effort": "high",
-  "_reasoning_effort_options": ["none", "low", "high", "max"],
+  "_reasoning_effort_options": ["provider-default", "none", "low", "high", "max"],
   "max_turns": 50,
   "max_run_seconds": 18000,
   "allowed_tools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit"]
@@ -288,13 +291,81 @@ revision, or when a compatible endpoint uses different model names, without
 changing how Claude/Codex calls the MCP tools. The public tool argument remains
 only `model="flash"` or `model="pro"`.
 
-`flash_reasoning_effort` and `pro_reasoning_effort` accept `none`, `low`, `high`,
-or `max`. `none` disables thinking; the other values explicitly enable thinking
-at that effort. `_reasoning_effort_options` is only an in-file hint and is ignored
-at runtime. If an effort field is absent, deepseek-mcp leaves thinking controls
-unspecified for that slot so the provider's existing default applies; this keeps
-older configs and OpenAI-compatible gateways compatible. New installer-generated
-configs explicitly set both slots to `high`.
+`flash_reasoning_effort` and `pro_reasoning_effort` accept `provider-default`,
+`none`, `low`, `high`, or `max`. `provider-default` (also the default when the
+field is absent) sends no reasoning controls. `none` disables DeepSeek thinking;
+the other values explicitly enable it at that effort. `_reasoning_effort_options`
+is only an in-file hint and is ignored at runtime. New installer-generated
+configs explicitly set both slots to `high`; for a generic local server, change
+those fields to `provider-default` or remove them.
+
+## Local / OpenAI-compatible models
+
+Set `base_url` and the model IDs in the existing config. The public `flash` and
+`pro` choices remain host-facing profiles and may both point to the same model:
+
+```json
+{
+  "base_url": "http://127.0.0.1:8080/v1",
+  "flash": "your-local-model",
+  "pro": "your-local-model",
+  "flash_reasoning_effort": "provider-default",
+  "pro_reasoning_effort": "provider-default",
+  "max_output_tokens": 1024
+}
+```
+
+This supports servers that implement the OpenAI-compatible
+`/v1/chat/completions` interface, such as llama.cpp server, LM Studio, vLLM,
+SGLang, Ollama's compatible endpoint, and other compatible servers. These are
+interface-level examples; this project does not claim to have tested every
+server version or model. HTTP remains limited to `localhost`, `127.0.0.1`, and
+`[::1]`; remote endpoints must use HTTPS.
+
+When updating an installer-generated config, replace both reasoning effort fields
+as shown above. Generic endpoints receive no DeepSeek-specific `thinking` extension;
+explicit efforts send only `reasoning_effort`, which the server must support.
+`max_output_tokens` bounds each response (1–16384; default 16384). Lower it for
+small local context windows, leaving room for the prompt and accumulated tool history.
+
+Unauthenticated loopback servers need no key. The local fallback credential is
+only a dummy value, and `DEEPSEEK_API_KEY` is not sent to a loopback server. If
+your local server requires a key, set `OPENAI_API_KEY` before starting Claude
+Code or Codex. For remote compatible endpoints, `OPENAI_API_KEY` is supported;
+DeepSeek's hosted endpoint continues to use `DEEPSEEK_API_KEY`. Windows secrets
+remain environment-only.
+Custom remote endpoints do not inherit `DEEPSEEK_API_KEY`; configure their own
+`OPENAI_API_KEY` or an explicit `api_key` on POSIX.
+
+The server must support `/v1/chat/completions` with OpenAI-compatible tool
+calling, enough context for the delegated task and tool history, and reasonably
+well-formed structured tool calls. The agent loop continues after a tool call,
+executes the selected Read / Write / Edit / Bash / Glob / Grep / NotebookEdit
+tool, and sends the result back to the model. If an endpoint omits usage data,
+the run stays bounded by byte-based resource accounting; returned token counts
+can be zero because the provider did not report them.
+
+To validate a real local model against a disposable workspace, run:
+
+```bash
+python scripts/smoke_local_model.py --base-url http://127.0.0.1:1234/v1 --model your-local-model
+```
+
+Use the project's installed Python environment. The check verifies real Read,
+Edit, and Bash calls, exact file contents, the command's success marker, mutation
+recovery acknowledgement, and a subsequent read-only delegation.
+It does not download models or change your persistent configuration.
+
+To also verify the host-facing MCP stdio boundary and parent-to-agent messages:
+
+```bash
+python scripts/smoke_local_mcp.py --base-url http://127.0.0.1:1234/v1 --model your-local-model
+```
+
+This starts the current source server with a disposable HOME and workspace,
+checks synchronous coding and read-only delegation, verifies and acknowledges
+mutation records, and sends a random steering token to a Pro-profile background
+job. The check requires that token in the model's final response.
 
 For upgrade compatibility, a legacy single `model` field is still accepted when
 `flash` and `pro` are absent; its value is used for both slots. Do not combine
@@ -324,7 +395,7 @@ The selected API—not a task argument or model request—freezes that capabilit
 for the job lifetime.
 See [SECURITY.md](SECURITY.md) for boundaries and platform limitations.
 
-Override at runtime with env vars: `DEEPSEEK_API_KEY`, `DEEPSEEK_WORKSPACE`, `DEEPSEEK_MODE=off`.
+Override at runtime with env vars: `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_WORKSPACE`, `DEEPSEEK_MODE=off`.
 
 ## Uninstall
 

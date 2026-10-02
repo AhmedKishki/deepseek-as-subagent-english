@@ -284,8 +284,83 @@ class ConfigTests(unittest.TestCase):
                 patch("deepseek_mcp.config._load_api_key") as load_key,
             ):
                 Config.validate_runtime_settings()
-
         load_key.assert_not_called()
+
+    def test_deepseek_credential_flow_remains_compatible(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"DEEPSEEK_API_KEY": "sk-deepseek", "OPENAI_API_KEY": "sk-openai"},
+            clear=True,
+        ):
+            self.assertEqual(
+                _load_api_key({}, "https://api.deepseek.com/v1"), "sk-deepseek"
+            )
+        with patch.dict(os.environ, {}, clear=True):
+            if os.name == "nt":
+                with self.assertRaisesRegex(RuntimeError, "cannot store API keys safely"):
+                    _load_api_key({"api_key": "sk-config"}, "https://api.deepseek.com")
+            else:
+                self.assertEqual(
+                    _load_api_key({"api_key": "sk-config"}, "https://api.deepseek.com"),
+                    "sk-config",
+                )
+
+    def test_local_provider_needs_no_deepseek_key_and_does_not_leak_it(self) -> None:
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-private"}, clear=True):
+            self.assertEqual(
+                _load_api_key({}, "http://127.0.0.1:8080/v1"), "local-no-auth"
+            )
+        with patch.dict(
+            os.environ,
+            {"DEEPSEEK_API_KEY": "sk-private", "OPENAI_API_KEY": "local-auth"},
+            clear=True,
+        ):
+            self.assertEqual(
+                _load_api_key({}, "http://localhost:8080/v1"), "local-auth"
+            )
+
+    def test_custom_remote_endpoint_does_not_inherit_deepseek_environment_key(self) -> None:
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-private"}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "Provider API key not configured"):
+                _load_api_key({}, "https://models.example.com/v1")
+            if os.name == "nt":
+                with self.assertRaisesRegex(RuntimeError, "cannot store API keys safely"):
+                    _load_api_key({"api_key": "sk-explicit"}, "https://models.example.com/v1")
+            else:
+                self.assertEqual(_load_api_key({"api_key": "sk-explicit"},
+                                              "https://models.example.com/v1"), "sk-explicit")
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-private",
+                                    "OPENAI_API_KEY": "sk-custom"}, clear=True):
+            self.assertEqual(_load_api_key({}, "https://models.example.com/v1"), "sk-custom")
+
+    def test_custom_provider_model_id_and_provider_default_reasoning_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = Config._from_data(
+                {
+                    "workspace": tmpdir,
+                    "allowed_tools": ["Read"],
+                    "base_url": "http://[::1]:8080/v1",
+                    "flash": "qwen3.8-27b-q3",
+                    "pro": "unsloth/Qwen...",
+                    "flash_reasoning_effort": "provider-default",
+                },
+                "local-no-auth",
+            )
+
+        self.assertEqual(config.flash_model, "qwen3.8-27b-q3")
+        self.assertEqual(config.pro_model, "unsloth/Qwen...")
+        self.assertEqual(config.reasoning_effort, "provider-default")
+
+    def test_local_output_limit_is_configurable_and_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data = {"workspace": tmpdir, "allowed_tools": ["Read"],
+                    "max_output_tokens": 512}
+            self.assertEqual(Config._from_data(data, "local").max_output_tokens, 512)
+            for value in (True, None, "512", 0, -1, 16385):
+                with self.subTest(value=value), self.assertRaisesRegex(
+                    RuntimeError, "max_output_tokens"
+                ):
+                    Config._from_data({**data, "max_output_tokens": value}, "local")
 
     def test_model_must_be_a_nonempty_string(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
