@@ -498,8 +498,9 @@ class RetryPolicyTests(unittest.TestCase):
             ):
                 result = run_agent("test", config)
 
-        self.assertIn("transaction safety", result["final_message"])
-        self.assertIn("durability", result["final_message"])
+        self.assertEqual(result["final_message"], "done")
+        self.assertIn("transaction safety", "\n".join(result["notices"]))
+        self.assertIn("durability", "\n".join(result["notices"]))
         self.assertEqual(result["mutations"][0]["transaction_id"], "a" * 32)
 
     def test_clean_mutation_recovery_notice_leads_the_final_result(self) -> None:
@@ -524,7 +525,8 @@ class RetryPolicyTests(unittest.TestCase):
             ):
                 result = run_agent("test", config)
 
-        message = result["final_message"]
+        self.assertEqual(result["final_message"], "done")
+        message = result["notices"][0]
         self.assertTrue(message.startswith("[deepseek-mcp recovery required]"))
         self.assertIn("get_deepseek_recovery", message)
         self.assertIn("acknowledge_deepseek_mutations", message)

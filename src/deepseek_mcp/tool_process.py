@@ -35,6 +35,8 @@ from .resource_budget import MutationBudget, ResourceBudgetExceeded
 from .mutation_outcome import MutationRecord, mutation_record
 from .tool_child import MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES
 from .tool_cleanup import cleanup_tool_artifacts
+from .tool_evidence import decode_evidence, deliver_evidence
+from .mutation_receipt import intent_identity
 from .workspace_guard import bind_workspace_identity, require_workspace_identity
 
 _TOOL_ENVIRONMENT = (
@@ -174,7 +176,7 @@ def _communicate(
         ready.set()
 
 
-def _decode(raw: bytes, budget: MutationBudget) -> str:
+def _decode(raw: bytes, budget: MutationBudget) -> tuple[str, object]:
     try:
         payload = json.loads(raw.splitlines()[-1])
     except (IndexError, TypeError, ValueError, json.JSONDecodeError):
@@ -193,7 +195,7 @@ def _decode(raw: bytes, budget: MutationBudget) -> str:
     if not budget.used <= used <= budget.limit:
         raise AgentLoopError("tool process returned an invalid budget")
     budget.used = used
-    return result
+    return result, payload.get("evidence")
 
 
 def _mutation_digest(raw: bytes) -> bytes | None:
@@ -315,7 +317,7 @@ def _receive_tool_result(
     process, communication: threading.Thread, ready: threading.Event,
     cancel_signal, deadline: Deadline, state: _Communication,
     budget: MutationBudget,
-) -> str:
+) -> tuple[str, object]:
     try:
         communication.start()
     except RuntimeError:
@@ -342,7 +344,8 @@ def _finish_interrupted_call(
                 filter(None, (warning, f"cleanup failed: {cleanup_error}"))
             )
         record = mutation_record(
-            transaction_id, name, mutation_state, warning
+            transaction_id, name, mutation_state, warning,
+            **intent_identity(config, transaction_id, name, _mutation_digest(output)),
         )
         if outcome_reporter is not None:
             outcome_reporter(record)
@@ -366,7 +369,9 @@ def _completed_mutation_record(
         warning = "; ".join(filter(None, (warning, f"cleanup failed: {cleanup_error}")))
     elif not cleanup_ok:
         warning = "; ".join(filter(None, (warning, "artifact cleanup failed")))
-    return mutation_record(active.transaction_id, name, state, warning)
+    return mutation_record(active.transaction_id, name, state, warning,
+                           **intent_identity(config, active.transaction_id, name,
+                                             _mutation_digest(active.state.output)))
 
 
 def _launch_tool_call(
@@ -447,21 +452,24 @@ def execute_in_subprocess(
     cancel_signal,
     deadline: Deadline,
     outcome_reporter: Callable[[MutationRecord], None] | None = None,
+    evidence_reporter: Callable[[dict], None] | None = None,
 ) -> str:
     """Execute one tool and kill its process group at cancellation/deadline."""
     remaining = deadline_remaining(deadline)
     if remaining <= 0:
-        raise AgentLoopError("run time budget exceeded")
+        raise AgentLoopError("run time budget exceeded", finish_reason="time_budget")
     active = _launch_tool_call(
         config, name, arguments, budget, max_bash_timeout, lease_fd, remaining
     )
     result: str | None = None
     failure: BaseException | None = None
+    evidence: list[dict] = []
     try:
-        result = _receive_tool_result(
+        result, raw_evidence = _receive_tool_result(
             active.process, active.communication, active.ready, cancel_signal,
             deadline, active.state, budget,
         )
+        evidence = decode_evidence(raw_evidence, name)
     except BaseException as error:
         failure = error
     cleanup_error: AgentLoopError | None = None
@@ -474,7 +482,10 @@ def execute_in_subprocess(
         )
     except AgentLoopError as error:
         cleanup_ok, cleanup_error = False, error
-    return _complete_tool_call(
-        active, config, name, arguments, result, failure,
-        cleanup_ok, cleanup_error, outcome_reporter,
-    )
+    try:
+        return _complete_tool_call(
+            active, config, name, arguments, result, failure,
+            cleanup_ok, cleanup_error, outcome_reporter,
+        )
+    finally:
+        deliver_evidence(evidence, evidence_reporter)

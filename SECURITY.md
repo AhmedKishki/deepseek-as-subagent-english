@@ -8,6 +8,8 @@ Delegated task/context text, model messages, and outputs of files/tools chosen b
 
 Trusted-host Bash receives no provider credential, proxy variable, or host `HOME`; its `HOME` is the workspace. It runs with the local user's permissions, so it is not an OS sandbox. Logs redact file contents, edit strings, and commands; usage records contain counts and timings rather than task text.
 
+Execution receipts distinguish worker prose from server-produced notices and bounded tool evidence. Evidence contains workspace-relative source identities, query/command/output hashes, counts, exit/timeout outcomes, and completeness flags—not raw commands, file excerpts, stdout/stderr, or task/context text. It is returned to the requesting host, not added to persistent logs or a remote analytics service. Hashes can reveal equality and are not encryption. Receipts do not establish semantic correctness, capture a stable workspace snapshot, or audit all data egress; missing observations are reported as unknown. A model's completion or a command's zero exit must not substitute for host acceptance checks.
+
 Provider calls run in an isolated Python child with private stdio pipes. The credential is sent over that private input pipe, never command-line arguments or inherited environment. Workspace cwd/PYTHONPATH/user-site and `.pth` processing are excluded from helper imports. File-mutation configurations fail closed when the runtime or installed package is inside the delegated workspace.
 
 On POSIX, the server and provider child disable core dumps before reading credentials. Linux provider children also have a 1 GiB hard address-space limit; macOS relies on the platform-independent decoded-response cap. Windows processes set WER's `NOHEAP` flag before accepting work.

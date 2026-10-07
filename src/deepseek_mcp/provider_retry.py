@@ -23,6 +23,11 @@ API_RETRY_BACKOFF_SECONDS = 2.0
 class AgentLoopError(Exception):
     """The delegated agent could not finish safely."""
 
+    def __init__(self, message: str, *, finish_reason: str = "execution_error") -> None:
+        super().__init__(message)
+        self.finish_reason = finish_reason
+        self.delegation_result: dict | None = None
+
 
 class AgentLoopCancelled(AgentLoopError):
     """The parent cancelled the delegated agent."""
@@ -70,14 +75,15 @@ def call_with_retry(
         if not retryable:
             kind = "client" if summary == "category=client" else "API"
             raise AgentLoopError(
-                f"DeepSeek {kind} error on turn {turn}: {summary}"
+                f"DeepSeek {kind} error on turn {turn}: {summary}",
+                finish_reason="provider_error",
             ) from None
         last_summary = summary
         if attempt < API_RETRY_ATTEMPTS:
             _backoff(attempt, attempts, turn, summary, cancel_signal, deadline)
     raise AgentLoopError(
         f"DeepSeek API unreachable after {attempts} attempts on turn {turn}: "
-        f"{last_summary}"
+        f"{last_summary}", finish_reason="provider_error",
     ) from None
 
 
@@ -92,7 +98,8 @@ def _request_once(config, messages, tools, cancel_signal, deadline):
         ) from None
     except ProviderRequestDeadline:
         raise AgentLoopError(
-            f"run time budget exceeded ({config.max_run_seconds}s)"
+            f"run time budget exceeded ({config.max_run_seconds}s)",
+            finish_reason="time_budget",
         ) from None
 
 
@@ -135,5 +142,5 @@ def wait_before_retry(
 def remaining_seconds(deadline: Deadline) -> float:
     remaining = deadline_remaining(deadline)
     if remaining <= 0:
-        raise AgentLoopError("run time budget exceeded")
+        raise AgentLoopError("run time budget exceeded", finish_reason="time_budget")
     return remaining

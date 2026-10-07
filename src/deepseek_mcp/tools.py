@@ -1,15 +1,13 @@
 """Bounded, workspace-confined tools used by the DeepSeek agent loop."""
 from __future__ import annotations
-import json
-import uuid
 from pathlib import Path
+from typing import Callable
 from .bash_tool import execute_bash
 from .config import Config
 from .file_io import (
     MAX_TEXT_FILE_BYTES,
     MISSING_FILE,
     FileIdentity,
-    MissingFile,
     MutationCommittedWarning,
     ToolInputError,
     WorkspaceFileNotFound,
@@ -20,12 +18,25 @@ from .file_identity import bounded_integer
 from .safe_regex import RegexPattern, SafeRegexError, compile_safe_regex
 from .resource_budget import MutationBudget, ResourceBudgetExceeded, apply_mutation
 from .safety import SandboxViolation
+from .tool_evidence import (
+    GrepStats,
+    bind_tool_evidence,
+    emit_error,
+    emit_glob,
+    emit_grep,
+    emit_read,
+    emit_mutation,
+)
+from .tool_notebook import (
+    MAX_WRITE_BYTES,
+    _committed_result,
+    _execute_notebook_edit,
+    _utf8_size,
+)
 from .tool_schemas import build_tool_schemas
-from .transaction_report import mutation_warning
 from .walk_support import WorkspaceEntryTooLarge
 from .workspace_walk import WalkEntry, WorkspaceWalk
 MAX_TOOL_OUTPUT = 50_000  # Maximum characters returned from one tool call.
-MAX_WRITE_BYTES = 5_000_000  # Maximum bytes per Write (5 MB; prevents run-away disk use).
 MAX_GLOB_RESULTS = 500
 MAX_GREP_FILES = 10_000
 MAX_GREP_LINE_CHARS = 2_000
@@ -36,15 +47,6 @@ def _truncate(text: str) -> str:
             + f"\n... [truncated, total {len(text)} chars, showing first {MAX_TOOL_OUTPUT}]"
         )
     return text
-
-def _committed_result(result: str, warning: Exception) -> str:
-    mutation_warning(str(warning))
-    return f"{result}; WARNING: update committed but post-commit checks failed ({warning}); DO NOT RETRY."
-
-def _utf8_size(text: str) -> int:
-    if len(text) > MAX_WRITE_BYTES:
-        return MAX_WRITE_BYTES + 1
-    return len(text.encode("utf-8", errors="replace"))
 
 def _slice_lines(text: str, args: dict) -> str:
     if "offset" not in args and "limit" not in args:
@@ -62,16 +64,21 @@ def _execute_read(args: dict, workspace: Path) -> str:
     """Read a file. args: {path: str, offset?: int, limit?: int}"""
     path = args.get("path", "")
     if not isinstance(path, str) or not path:
+        emit_error("Read", "invalid_input")
         return "ERROR: missing required 'path' argument"
     try:
-        text, _identity = _read_workspace_text(
+        raw, identity = _read_workspace_text(
             workspace, path, reject_binary=True
         )
-        text = _slice_lines(text, args)
+        text = _slice_lines(raw, args)
     except WorkspaceFileNotFound:
+        emit_error("Read", "not_found")
         return f"ERROR: file not found: {path}"
     except (OSError, SandboxViolation, ToolInputError) as e:
+        emit_error("Read", "read_failed")
         return f"ERROR: failed to read {path}: {e}"
+    emit_read(workspace, path, identity, raw, text[:MAX_TOOL_OUTPUT], args,
+              len(text) > MAX_TOOL_OUTPUT)
     return _truncate(text)
 
 def _execute_write(
@@ -81,10 +88,13 @@ def _execute_write(
     path = args.get("path", "")
     content = args.get("content", "")
     if not isinstance(path, str) or not path:
+        emit_error("Write", "invalid_input")
         return "ERROR: missing required 'path' argument"
     if not isinstance(content, str):
+        emit_error("Write", "invalid_input")
         return "ERROR: 'content' must be a string"
     if _utf8_size(content) > MAX_WRITE_BYTES:
+        emit_error("Write", "invalid_input")
         return f"ERROR: content exceeds {MAX_WRITE_BYTES} bytes; split into smaller writes."
     try:
         apply_mutation(
@@ -96,13 +106,17 @@ def _execute_write(
     except ResourceBudgetExceeded:
         raise
     except MutationCommittedWarning as exc:
+        emit_mutation("Write", incomplete=True)
         return _committed_result(f"OK: wrote {len(content)} chars to {path}", exc)
     except ToolInputError as e:
+        emit_error("Write", "invalid_input")
         if "appeared during edit" in str(e):
             return f"ERROR: file already exists: {path}; use Edit for existing files"
         return f"ERROR: failed to write {path}: {e}"
     except Exception as e:
+        emit_error("Write", "internal")
         return f"ERROR: failed to write {path}: {e}"
+    emit_mutation("Write")
     return f"OK: wrote {len(content)} chars to {path}"
 
 def _parse_edit_request(args: dict) -> tuple[str, str, str, bool]:
@@ -153,7 +167,7 @@ def _build_replacement(
 def _execute_edit(
     args: dict, workspace: Path, mutation_budget: MutationBudget | None = None
 ) -> str:
-    """Exact string replacement. args: {path, old_string, new_string, replace_all?: bool}"""
+    """Exact string replacement. args: {path, old_string, new_string, replace_all?}"""
     try:
         path, old, new, replace_all = _parse_edit_request(args)
         text, identity = _read_edit_target(path, workspace)
@@ -161,6 +175,7 @@ def _execute_edit(
             text, old, new, replace_all, path
         )
     except (SandboxViolation, ToolInputError) as exc:
+        emit_error("Edit", "invalid_input")
         return f"ERROR: {exc}"
     try:
         apply_mutation(
@@ -172,11 +187,14 @@ def _execute_edit(
     except ResourceBudgetExceeded:
         raise
     except MutationCommittedWarning as exc:
+        emit_mutation("Edit", incomplete=True)
         return _committed_result(
             f"OK: replaced {replacements} occurrence(s) in {path}", exc
         )
     except Exception as e:
+        emit_error("Edit", "internal")
         return f"ERROR: failed to write {path}: {e}"
+    emit_mutation("Edit")
     return f"OK: replaced {replacements} occurrence(s) in {path}"
 
 def _parse_glob_request(args: dict, workspace: Path) -> WorkspaceWalk:
@@ -208,7 +226,7 @@ def _format_glob_result(
         summary += f" (limit {MAX_GLOB_RESULTS} reached)"
     elif traversal_limit:
         summary += " (configured traversal limit reached)"
-    return _truncate(summary + ":\n" + "\n".join(rel_matches))
+    return summary + ":\n" + "\n".join(rel_matches)
 
 
 def _execute_glob(args: dict, workspace: Path) -> str:
@@ -217,186 +235,40 @@ def _execute_glob(args: dict, workspace: Path) -> str:
         with _parse_glob_request(args, workspace) as walk:
             matches, result_limit = _scan_glob_matches(walk)
             traversal_limit = walk.truncated
+            scope = walk.base
     except (SandboxViolation, ToolInputError) as exc:
+        emit_error("Glob", "invalid_input")
         return f"ERROR: {exc}"
-    return _format_glob_result(
+    body = _format_glob_result(
         matches, result_limit, traversal_limit, workspace.resolve()
     )
-
-
-def _new_notebook() -> dict:
-    return {
-        "cells": [],
-        "metadata": {
-            "kernelspec": {
-                "display_name": "Python 3",
-                "language": "python",
-                "name": "python3",
-            },
-            "language_info": {"name": "python"},
-        },
-        "nbformat": 4,
-        "nbformat_minor": 5,
-    }
-
-
-def _load_notebook(
-    workspace: Path, label: str, edit_mode: str
-) -> tuple[dict, FileIdentity | MissingFile]:
-    try:
-        text, identity = _read_workspace_text(
-            workspace, label, strict_utf8=True
-        )
-    except WorkspaceFileNotFound:
-        if edit_mode == "insert":
-            return _new_notebook(), MISSING_FILE
-        raise ToolInputError(f"notebook not found: {label}")
-    try:
-        notebook = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ToolInputError(f"failed to parse notebook JSON: {exc}") from exc
-    if not isinstance(notebook, dict) or not isinstance(notebook.get("cells"), list):
-        raise ToolInputError("not a valid notebook (missing 'cells' array)")
-    return notebook, identity
-
-
-def _find_cell_index(cells: list, args: dict, edit_mode: str, label: str) -> int | None:
-    cell_id = args.get("cell_id")
-    if cell_id is not None:
-        for index, cell in enumerate(cells):
-            if isinstance(cell, dict) and cell.get("id") == cell_id:
-                return index
-        if edit_mode != "insert":
-            raise ToolInputError(f"cell_id '{cell_id}' not found in {label}")
-        return None
-    raw_index = args.get("cell_index")
-    if raw_index is not None:
-        if isinstance(raw_index, bool) or not isinstance(raw_index, int):
-            raise ToolInputError("cell_index must be an integer")
-        index = raw_index
-        if 0 <= index < len(cells):
-            return index
-        if edit_mode != "insert":
-            raise ToolInputError(
-                f"cell_index {index} out of range (0..{len(cells) - 1})"
-            )
-        return None
-    if edit_mode != "insert":
-        raise ToolInputError("replace/delete require cell_id or cell_index")
-    return None
-
-
-def _split_source(source: str) -> list[str]:
-    if not source:
-        return [""]
-    lines = source.splitlines(keepends=True)
-    return lines if lines else [""]
-
-
-def _replace_cell(cells: list, index: int | None, source: str) -> str:
-    if index is None or not isinstance(cells[index], dict):
-        raise ToolInputError("target notebook cell is invalid")
-    cell = cells[index]
-    cell["source"] = _split_source(source)
-    if cell.get("cell_type") == "code":
-        cell["outputs"] = []
-        cell["execution_count"] = None
-    return f"OK: replaced cell at index {index} (id={cell.get('id', 'n/a')})"
-
-
-def _insert_cell(cells: list, index: int | None, source: str, cell_type: str) -> str:
-    if cell_type not in ("code", "markdown"):
-        raise ToolInputError(f"invalid cell_type '{cell_type}' (must be code or markdown)")
-    cell: dict = {
-        "cell_type": cell_type,
-        "id": uuid.uuid4().hex[:8],
-        "source": _split_source(source),
-        "metadata": {},
-    }
-    if cell_type == "code":
-        cell.update({"outputs": [], "execution_count": None})
-    insert_at = index + 1 if index is not None else len(cells)
-    cells.insert(insert_at, cell)
-    return f"OK: inserted {cell_type} cell at index {insert_at} (id={cell['id']})"
-
-
-def _apply_notebook_edit(cells: list, args: dict, mode: str, index: int | None) -> str:
-    source = args.get("new_source", "")
-    if mode in ("replace", "insert") and not isinstance(source, str):
-        raise ToolInputError("'new_source' must be a string")
-    if isinstance(source, str) and _utf8_size(source) > MAX_WRITE_BYTES:
-        raise ToolInputError(f"new_source exceeds {MAX_WRITE_BYTES} bytes")
-    if mode == "replace":
-        return _replace_cell(cells, index, source)
-    if mode == "insert":
-        return _insert_cell(cells, index, source, args.get("cell_type", "code"))
-    if index is None or not isinstance(cells[index], dict):
-        raise ToolInputError("target notebook cell is invalid")
-    removed = cells.pop(index)
-    return f"OK: deleted cell at index {index} (was id={removed.get('id', 'n/a')})"
-
-
-def _save_notebook(
-    workspace: Path,
-    label: str,
-    notebook: dict,
-    expected: FileIdentity | MissingFile,
-    mutation_budget: MutationBudget | None = None,
-) -> None:
-    content = json.dumps(notebook, ensure_ascii=False, indent=1) + "\n"
-    if _utf8_size(content) > MAX_WRITE_BYTES:
-        raise ToolInputError(f"notebook exceeds {MAX_WRITE_BYTES} bytes after edit")
-    apply_mutation(
-        mutation_budget,
-        _utf8_size(content),
-        lambda: _atomic_write_workspace_text(
-            workspace, label, content, expected=expected
-        ),
+    emit_glob(
+        workspace, scope, args["pattern"], len(matches), result_limit,
+        traversal_limit, len(body) > MAX_TOOL_OUTPUT,
     )
+    return _truncate(body)
 
 
-def _execute_notebook_edit(
-    args: dict, workspace: Path, mutation_budget: MutationBudget | None = None
-) -> str:
-    path = args.get("path", "")
-    if not isinstance(path, str) or not path:
-        return "ERROR: missing required 'path' argument"
-    if not path.endswith(".ipynb"):
-        return f"ERROR: not an .ipynb file: {path}"
-    edit_mode = args.get("edit_mode", "replace")
-    if edit_mode not in ("replace", "insert", "delete"):
-        return f"ERROR: invalid edit_mode '{edit_mode}' (must be replace/insert/delete)"
-    try:
-        notebook, identity = _load_notebook(workspace, path, edit_mode)
-        cells = notebook["cells"]
-        index = _find_cell_index(cells, args, edit_mode, path)
-        result = _apply_notebook_edit(cells, args, edit_mode, index)
-        _save_notebook(workspace, path, notebook, identity, mutation_budget)
-    except ResourceBudgetExceeded:
-        raise
-    except MutationCommittedWarning as exc:
-        return _committed_result(result + f" (total cells: {len(cells)})", exc)
-    except (SandboxViolation, ToolInputError, OSError) as exc:
-        return f"ERROR: {exc}"
-    return result + f" (total cells: {len(cells)})"
-
-
-def _grep_file(entry: WalkEntry, regex: RegexPattern, limit: int) -> list[str]:
+def _grep_file(
+    entry: WalkEntry, regex: RegexPattern, limit: int
+) -> tuple[list[str], str, int]:
     data = entry.read_bytes(MAX_TEXT_FILE_BYTES)
     if b"\x00" in data[:8192]:
-        return []
+        return [], "binary", 0
     lines = data.decode("utf-8", errors="replace").splitlines()
     matches: list[str] = []
+    clipped = 0
     for line_number, line in enumerate(lines, 1):
         if not regex.search(line):
             continue
         displayed = line[:MAX_GREP_LINE_CHARS]
         if len(line) > MAX_GREP_LINE_CHARS:
             displayed += "... [line truncated]"
+            clipped += 1
         matches.append(f"{entry.relative_to_workspace}:{line_number}: {displayed}")
         if len(matches) >= limit:
             break
-    return matches
+    return matches, "text", clipped
 
 def _parse_grep_request(
     args: dict, workspace: Path
@@ -419,23 +291,32 @@ def _parse_grep_request(
 
 def _scan_grep(
     walk: WorkspaceWalk, regex: RegexPattern, limit: int
-) -> tuple[list[str], bool]:
+) -> tuple[list[str], GrepStats]:
     results: list[str] = []
-    scanned = 0
-    incomplete = False
+    stats = GrepStats()
     for entry in walk:
         if not entry.is_file:
             continue
-        scanned += 1
-        if scanned > MAX_GREP_FILES:
-            return results, True
+        stats.files_scanned += 1
+        if stats.files_scanned > MAX_GREP_FILES:
+            stats.file_limit_reached = True
+            break
         try:
-            results.extend(_grep_file(entry, regex, limit - len(results)))
+            found, kind, line_clipped = _grep_file(
+                entry, regex, limit - len(results)
+            )
         except WorkspaceEntryTooLarge:
-            incomplete = True
+            stats.oversize_skipped += 1
+            continue
+        if kind == "binary":
+            stats.binary_skipped += 1
+            continue
+        results.extend(found)
+        stats.lines_clipped += line_clipped
         if len(results) >= limit:
-            return results, True
-    return results, incomplete
+            stats.match_limit_reached = True
+            break
+    return results, stats
 
 
 def _format_grep_result(results: list[str], pattern: str, truncated: bool) -> str:
@@ -446,19 +327,30 @@ def _format_grep_result(results: list[str], pattern: str, truncated: bool) -> st
     header = f"Found {len(results)} match(es)"
     if truncated:
         header += " (results incomplete)"
-    return _truncate(header + ":\n" + "\n".join(results))
+    return header + ":\n" + "\n".join(results)
 def _execute_grep(args: dict, workspace: Path) -> str:
     """Regex search of file contents. args: {pattern, path?, glob?, max_matches?}"""
     try:
         walk, regex, limit = _parse_grep_request(args, workspace)
         with walk:
-            results, match_limit = _scan_grep(walk, regex, limit)
-            traversal_limit = walk.truncated
+            results, stats = _scan_grep(walk, regex, limit)
+            stats.traversal_limited = walk.truncated
+            scope = walk.base
     except (SandboxViolation, ToolInputError, SafeRegexError) as exc:
+        emit_error("Grep", "invalid_input")
         return f"ERROR: {exc}"
-    return _format_grep_result(
-        results, regex.pattern, match_limit or traversal_limit
+    stats.matches = len(results)
+    truncated = (
+        stats.match_limit_reached or stats.file_limit_reached
+        or stats.traversal_limited or stats.oversize_skipped > 0
+        or stats.binary_skipped > 0
     )
+    body = _format_grep_result(results, regex.pattern, truncated)
+    emit_grep(
+        workspace, scope, regex.pattern, str(args.get("glob", "**/*")),
+        stats, len(body) > MAX_TOOL_OUTPUT,
+    )
+    return _truncate(body)
 TOOL_REGISTRY = {
     "Read": _execute_read,
     "Write": _execute_write,
@@ -477,13 +369,33 @@ def execute_tool(
     execution_lease_fd: int | None = None,
     mutation_budget: MutationBudget | None = None,
     max_bash_timeout: int | None = None,
+    evidence_reporter: Callable[[dict], None] | None = None,
 ) -> str:
     """Dispatch entrypoint: call the implementation for a tool name."""
+    if evidence_reporter is None:
+        return _dispatch_tool(
+            name, args, config, execution_lease_fd, mutation_budget, max_bash_timeout
+        )
+    with bind_tool_evidence(evidence_reporter):
+        return _dispatch_tool(
+            name, args, config, execution_lease_fd, mutation_budget, max_bash_timeout
+        )
+
+
+def _dispatch_tool(
+    name: str,
+    args: dict,
+    config: Config,
+    execution_lease_fd: int | None,
+    mutation_budget: MutationBudget | None,
+    max_bash_timeout: int | None,
+) -> str:
     if not isinstance(name, str):
         return "ERROR: tool name must be a string"
     if not isinstance(args, dict):
         return "ERROR: tool arguments must be an object"
     if name not in config.allowed_tools:
+        emit_error(name, "denied")
         return f"ERROR: tool '{name}' is not allowed by configuration"
     if name == "Bash":
         kwargs = {"lease_fd": execution_lease_fd}

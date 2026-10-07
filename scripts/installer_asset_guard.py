@@ -21,8 +21,10 @@ PUBLISHED_DIGESTS: dict[str, frozenset[str]] = {
             # pre-localization published copies
             "5fee1ad4ee0607694d2955772215de641f13366bb17b5c6348ed0e87eaecee65",
             "cdd5c6ccdc1f7f49464ae881c5fa6a89cb27c2847959f7190f0dfe2b276a3825",
-            # current English-only published copy
+            # earlier English-only published copy
             "11496e8f7cfb0eb98bfe0a4951e1b4f06582ec1f449e3dc9ff499400f7fab221",
+            # evidence-backed delegation policy
+            "7eef5e3d6fa6d6094aed21c46ae39b6da20473302154a694335d9c26f0421116",
         }
     ),
     "command": frozenset(
@@ -30,8 +32,10 @@ PUBLISHED_DIGESTS: dict[str, frozenset[str]] = {
             # pre-localization published copies
             "de0a8464a5fc1a7ac666606b7ae46fe4334387195034667ca5e45246eabf5562",
             "9635bee0de64a46ae366d23bc562c37532f6e9d1022f707977cd5a9045828437",
-            # current English-only published copy
+            # earlier English-only published copy
             "582326aeecd3f64e6cde8197480d3f957ad64324179246f9988c35ae326f5614",
+            # proportional acceptance policy
+            "056ebacbb66f83f9d1d8f367feae9231f8255f7f5216d56f6fadc2df3d5d3cbc",
         }
     ),
 }

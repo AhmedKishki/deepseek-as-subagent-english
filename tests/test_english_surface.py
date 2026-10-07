@@ -47,6 +47,20 @@ class EnglishSurfaceTests(unittest.TestCase):
         self.assertIn("numbered, sequential instructions", skill)
         self.assertIn("one execution per canonical workspace", skill)
 
+    def test_host_instructions_lead_with_task_fit_and_keep_recovery_contract(self):
+        from deepseek_mcp.host_instructions import HOST_INSTRUCTIONS
+
+        prefix = HOST_INSTRUCTIONS[:512]
+        self.assertTrue(HOST_INSTRUCTIONS.startswith("Task fit"))
+        self.assertIn("get_deepseek_recovery", prefix)
+        self.assertIn("acknowledge_deepseek_mutations", prefix)
+
+    def test_codex_instructions_do_not_overclaim_bash_journaling(self):
+        codex = (ROOT / "adapters/codex/instructions.md").read_text()
+        self.assertNotIn("Every file mutation is durably journaled", codex)
+        self.assertIn("Write/Edit/NotebookEdit mutations are durably journaled", codex)
+        self.assertIn("Bash changes are not transaction-journaled", codex)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,8 @@ class MutationRecord:
     tool: str
     status: str
     warning: str | None = None
+    path: str | None = None
+    sha256: str | None = None
 
     def as_dict(self) -> dict[str, str]:
         payload = {
@@ -22,6 +24,10 @@ class MutationRecord:
         }
         if self.warning:
             payload["warning"] = self.warning
+        if self.path is not None:
+            payload["path"] = self.path
+        if self.sha256 is not None:
+            payload["sha256"] = self.sha256
         return payload
 
     def summary(self) -> str:
@@ -64,11 +70,14 @@ def mutation_record(
     tool: str,
     status: str,
     warning: str | None = None,
+    *,
+    path: str | None = None,
+    sha256: str | None = None,
 ) -> MutationRecord:
     if status not in {"committed", "uncertain"}:
         raise ValueError("invalid mutation status")
     safe_warning = warning[:MAX_WARNING_CHARS] if warning else None
-    return MutationRecord(transaction_id, tool, status, safe_warning)
+    return MutationRecord(transaction_id, tool, status, safe_warning, path, sha256)
 
 
 def mutation_failure_message(
@@ -94,12 +103,16 @@ def records_from_result(result: object) -> list[MutationRecord]:
             value.get("transaction_id"), value.get("tool"), value.get("status")
         )
         warning = value.get("warning")
+        path, sha256 = value.get("path"), value.get("sha256")
         if not all(isinstance(item, str) for item in (transaction_id, tool, status)):
             continue
         if warning is not None and not isinstance(warning, str):
             continue
+        if any(item is not None and not isinstance(item, str) for item in (path, sha256)):
+            continue
         try:
-            records.append(mutation_record(transaction_id, tool, status, warning))
+            records.append(mutation_record(transaction_id, tool, status, warning,
+                                           path=path, sha256=sha256))
         except ValueError:
             continue
     return records

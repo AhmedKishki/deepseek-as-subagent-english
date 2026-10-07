@@ -490,9 +490,9 @@ else
     echo "Try it now:"
     echo "  cd <your project directory> && claude     # a running claude must restart to load the new MCP"
     echo "  > /ds inspect the current project and summarize its code structure    # force DeepSeek to do the work"
-    echo "  > call the ping tool                       # verify the MCP connection + see the sandbox root"
+    echo "  > call the ping tool                       # verify the MCP connection + see the workspace root"
     echo ""
-    echo "Automatic delegation: ask the main conversation for something like \"batch-extract i18n to JSON\" and Claude will delegate to DeepSeek on its own"
+    echo "Automatic delegation: the installed skill recommends self-contained jobs with cheap acceptance checks; Claude decides whether to invoke it."
     echo "Disable delegation: run DEEPSEEK_MODE=off claude (current Claude session only)"
 fi
 echo ""

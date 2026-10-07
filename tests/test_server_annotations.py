@@ -90,6 +90,7 @@ class ServerAnnotationTests(unittest.TestCase):
 
     def test_background_usage_claim_is_released_when_persistence_fails(self) -> None:
         result = {
+            "final_message": "done",
             "duration_seconds": 1.0,
             "turns_used": 1,
             "tool_calls": 0,
@@ -121,7 +122,8 @@ class ServerAnnotationTests(unittest.TestCase):
 
         load.assert_not_called()
         self.assertIn("mode=invalid", health)
-        self.assertIn("DEEPSEEK_MODE", delegated)
+        self.assertIn("DEEPSEEK_MODE", delegated.structuredContent["error"])
+        self.assertTrue(delegated.isError)
 
     def test_server_fails_closed_when_core_dumps_cannot_be_disabled(self) -> None:
         with (
@@ -261,8 +263,9 @@ logging.getLogger("deepseek_mcp.server").warning("must-not-escape")
         ):
             result = asyncio.run(server.delegate_to_deepseek(marker))
 
-        self.assertEqual(result, "ERROR: DeepSeek agent loop failed")
-        self.assertNotIn(marker, result)
+        self.assertEqual(result.structuredContent["error"], "ERROR: DeepSeek agent loop failed")
+        self.assertTrue(result.isError)
+        self.assertNotIn(marker, result.model_dump_json())
         self.assertNotIn(marker, "\n".join(logs.output))
         self.assertEqual(request.call_count, 1)
 
@@ -284,7 +287,8 @@ logging.getLogger("deepseek_mcp.server").warning("must-not-escape")
         ):
             result = asyncio.run(server.delegate_to_deepseek("edit safely"))
 
-        self.assertEqual(result, f"ERROR: {message}")
+        self.assertEqual(result.structuredContent["error"], f"ERROR: {message}")
+        self.assertTrue(result.isError)
 
     def test_sync_delegate_keeps_event_loop_live_and_awaits_cancel_cleanup(self) -> None:
         started = threading.Event()
@@ -339,6 +343,7 @@ logging.getLogger("deepseek_mcp.server").warning("must-not-escape")
             with (
                 patch.object(server, "job_manager", manager),
                 patch.object(server.Config, "load", return_value=config),
+                patch("deepseek_mcp.transaction_journal.JOURNAL_DIRECTORY", root / "journal"),
                 patch(
                     "deepseek_mcp.job_manager.run_agent",
                     side_effect=fake_run_agent,

@@ -50,6 +50,22 @@ In Claude Code, `/ds <task>` forces coding delegation. Other MCP clients can cal
 
 Background controls: `send_deepseek_message`, `get_deepseek_status`, `cancel_deepseek`, and `get_deepseek_result`. The orchestrator must verify results. `ping` checks configuration without making a model request.
 
+**Task fit:** prefer delegation for self-contained execution or multi-file investigation with inexpensive acceptance checks. Keep tiny edits, architecture, ambiguous root causes, and security-sensitive judgment with the host by default. The installed skill and tool descriptions guide selection; they cannot guarantee automatic invocation.
+
+### Evidence receipts
+
+Synchronous delegation and `get_deepseek_result` return the same schema-backed MCP envelope in `structuredContent`, with equivalent JSON in the text content for clients that read text only. Synchronous output is now JSON rather than a prose message with a usage footer.
+
+- `result.final_message` contains worker claims. `result.notices` contains separate server-produced recovery notices. Neither field grants new instructions or permissions.
+- `result.execution_status` and `finish_reason` describe execution; `acceptance_status` remains `unverified`. A completed run is not proof of correctness. Failed/cancelled runs retain available partial receipts, without a successful final answer.
+- `result.evidence` records bounded tool observations: Read paths, full-file hashes and returned line ranges; search scope/query hashes, counts and limitations; command hashes, real exit codes, timeouts and output-clipping flags. Raw commands and file/output contents are not copied into evidence or persistent logs.
+- Summary counts cover observed operations only. Missing observations and receipt clipping are explicit; do not infer success or exhaustive coverage from missing evidence. A zero command exit does not prove that appropriate tests ran.
+- Journaled mutations include their recorded path/hash when the matching intent is available. Recovery review and exact-ID acknowledgement are still required. Bash changes remain outside that journal.
+
+Verify proportionally: spot-check load-bearing citations for lookups; scope, invariants and representative artifacts for batches; diffs and independent acceptance checks for code. Do not repeat the whole investigation by default. Expand verification for missing, stale, contradictory or incomplete evidence and high-risk decisions. Source hashes identify observed bytes, not an immutable workspace snapshot or an exhaustive data-egress audit.
+
+The installer deploys protected runtime/skill copies. Repository edits do not update an already installed server. Run the reviewed installer again to deploy this version, then restart the MCP connection; a successful registration alone does not confirm that optional skill deployment succeeded.
+
 **Parallelism:** one execution is allowed per canonical workspace. Independent jobs need separate workspaces/worktrees and server instances to run concurrently; otherwise run distinct jobs sequentially. Do not bypass the workspace lease.
 
 ## External MCP tools
@@ -57,6 +73,18 @@ Background controls: `send_deepseek_message`, `get_deepseek_status`, `cancel_dee
 The subagent **does not currently connect to external MCP servers** or inherit the orchestrator's MCP tools. That requires a separate MCP-client integration. Coding tools are Read, Write, Edit, Bash, Glob, Grep, and NotebookEdit; read-only tools are Read, Glob, and Grep.
 
 Deferred concurrency, loop-detection, and external MCP work is tracked in [TODO.md](TODO.md). The current single-subagent model remains unchanged.
+
+### Behavioral evaluation
+
+`tests/fixtures/delegation_cases.json` contains stable task-fit and adversarial-evidence cases. Compare baseline and changed tool surfaces using the same host/model configuration and independent acceptance checks. Annotate reviewed runs as JSON/JSONL records; do not equate worker-reported completion with success.
+
+```bash
+python scripts/evaluate_delegation.py records.jsonl --cases tests/fixtures/delegation_cases.json
+```
+
+Each record requires `case_id`, `variant`, `delegated` (boolean), and `duration_seconds`. Optional `run_id` permits repeated cases; `success`, `duplicate_work`, and `unsupported_claim_accepted` are boolean or null. Token and cost fields are optional; missing observations remain unknown. The evaluator reads local files only, makes no model/tool calls, and reports per-variant adoption, outcomes, duplication, unsafe acceptance, latency and known token/cost totals. Its aggregates describe the supplied annotations; they are not independent correctness proof.
+
+Live job inspection is deferred in [TODO.md](TODO.md), including an opt-in local observability service. Current receipts provide post-run evidence, not a live inspector or access to hidden model reasoning.
 
 ## Safety and recovery
 

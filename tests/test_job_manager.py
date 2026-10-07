@@ -181,7 +181,10 @@ class JobManagerTests(unittest.TestCase):
 
         self.assertEqual(status["status"], "cancelled")
         self.assertTrue(status["cancel_requested"])
-        self.assertIsNone(manager.result(job["job_id"])["result"])
+        receipt = manager.result(job["job_id"])["result"]
+        self.assertEqual(receipt["execution_status"], "cancelled")
+        self.assertEqual(receipt["acceptance_status"], "unverified")
+        self.assertEqual(receipt["final_message"], "")
 
     def test_late_cancel_preserves_completed_mutation_transactions(self) -> None:
         manager = self._manager()

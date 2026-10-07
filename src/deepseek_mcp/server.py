@@ -31,6 +31,9 @@ from . import __version__
 from .agent_loop import AgentLoopCancelled, AgentLoopError
 from .provider_retry import MutationOutcomeError, MutationOutcomeCancelled
 from .mutation_outcome import mutation_failure_message, records_from_result
+from .result_contract import ReceiptResult, as_mcp_result, failure_response
+from .result_contract import sync_result as _format_sync_result
+from .run_evidence import mutation_cancellation
 from .config import Config
 from .execution_profile import (
     CODING_PROFILE, READONLY_PROFILE, ExecutionProfile, configure_delegation,
@@ -121,9 +124,7 @@ def _ensure_runtime_logging() -> None:
         _PACKAGE_LOGGER.propagate = False
         _LOG_READY = True
 
-# MCP protocol supports server-level instructions during initialization. Codex
-# reads them as server-wide guidance. Keep the first ~512 characters
-# self-contained because clients may surface/truncate instructions differently.
+# Keep the first ~512 instruction characters self-contained for truncating clients.
 # AGENTS.md remains an optional stronger/project-specific policy layer.
 mcp = FastMCP("deepseek-mcp", instructions=_HOST_INSTRUCTIONS)
 job_manager = DeepSeekJobManager()
@@ -183,7 +184,7 @@ def ping() -> str:
         ws_short = _shorten_path(cfg.workspace)
         tools = ",".join(cfg.allowed_tools)
         config_status = (
-            f"workspace={ws_short} (sandbox), model={cfg.model}, "
+            f"workspace={ws_short} (workspace root), model={cfg.model}, "
             f"reasoning_effort={cfg.reasoning_effort}, tools={tools}"
         )
     except Exception as e:
@@ -244,17 +245,6 @@ def _load_config(profile: ExecutionProfile = CODING_PROFILE) -> Config:
         raise JobError(f"deepseek-mcp not configured: {e}") from e
 
 
-def _format_sync_result(result: dict) -> str:
-    return (
-        f"{result['final_message']}\n\n"
-        f"---\n"
-        f"[deepseek-mcp] {result['turns_used']} turns, "
-        f"{result['tool_calls']} tool calls, "
-        f"{result['tokens']['total']} tokens, "
-        f"{result['duration_seconds']}s"
-    )
-
-
 def _build_full_task(task: str, context: str) -> str:
     validate_delegation_input(task, context)
     return f"{task}\n\n# Additional context\n{context}" if context else task
@@ -296,42 +286,50 @@ async def _run_sync_cancellable(full_task: str, config: Config) -> dict:
                 message = mutation_failure_message(
                     records, "MCP request cancelled after workspace update"
                 )
-                raise MutationOutcomeCancelled(message, tuple(records)) from None
+                raise mutation_cancellation(result, message, records) from None
         raise
 
-async def _delegate(task: str, context: str, profile: ExecutionProfile) -> str:
+async def _delegate(task: str, context: str, profile: ExecutionProfile) -> ReceiptResult:
     try:
         config, full_task = _prepare_sync_request(task, context, profile)
     except JobError as e:
-        return str(e)
+        return failure_response(str(e))
     try:
         result = await _run_sync_cancellable(full_task, config)
     except JobBusy as e:
-        return f"ERROR: DeepSeek execution busy: {e}"
+        return failure_response(f"ERROR: DeepSeek execution busy: {e}")
     except JobError as e:
-        return f"ERROR: DeepSeek execution blocked: {e}"
+        return failure_response(f"ERROR: DeepSeek execution blocked: {e}")
     except MutationOutcomeError as e:
         logger.error("DeepSeek delegation stopped category=mutation_outcome")
-        return f"ERROR: {e}"
-    except AgentLoopError:
+        return failure_response(f"ERROR: {e}", e)
+    except AgentLoopError as e:
         logger.error("DeepSeek delegation failed category=agent")
-        return "ERROR: DeepSeek agent loop failed"
-    except Exception:
+        return failure_response("ERROR: DeepSeek agent loop failed", e)
+    except Exception as e:
         logger.error("DeepSeek delegation failed category=internal")
-        return "ERROR: unexpected DeepSeek failure"
+        return failure_response("ERROR: unexpected DeepSeek failure", e)
 
     _log_sync_completion(result)
     _record_usage(len(task), result)
     return _format_sync_result(result)
 
 @mcp.tool(annotations=_AGENT_EXECUTION)
-async def delegate_to_deepseek(task: str, context: str = "") -> str:
-    """Run a full coding delegation. The configured model and reasoning depth apply."""
+async def delegate_to_deepseek(task: str, context: str = "") -> ReceiptResult:
+    """Delegate a self-contained coding or command-heavy job with cheap acceptance checks.
+    Pass scope, constraints, and acceptance criteria; chat is not inherited. Returns
+    worker claims plus a bounded execution receipt, not verified correctness. Host Bash
+    is not sandboxed. User model/effort apply; use start_deepseek for controls.
+    """
     return await _delegate(task, context, CODING_PROFILE)
 
 @mcp.tool(annotations=_READONLY_AGENT_EXECUTION)
-async def delegate_to_deepseek_readonly(task: str, context: str = "") -> str:
-    """Run pure file analysis. The configured model and reasoning depth apply."""
+async def delegate_to_deepseek_readonly(task: str, context: str = "") -> ReceiptResult:
+    """Investigate existing files for bounded multi-file searches, mapping, or static review.
+    Read/Glob/Grep only; no shell, writes, web, or inherited chat. Pass scope and
+    acceptance criteria. Returns worker findings and Read/search observations (hashes
+    and ranges when read); spot-check citations. User model/effort apply; start_* adds controls.
+    """
     return await _delegate(task, context, READONLY_PROFILE)
 
 
@@ -382,12 +380,20 @@ def _start_delegation(task: str, context: str, profile: ExecutionProfile) -> str
 
 @mcp.tool(annotations=_AGENT_EXECUTION)
 def start_deepseek(task: str, context: str = "") -> str:
-    """Start a coding job. The configured model and reasoning depth apply."""
+    """Start a self-contained coding/command job when steering or cancellation is needed.
+    Pass scope and acceptance checks; chat is not inherited. Returns job_id; retrieve
+    the execution receipt with get_deepseek_result. One execution per workspace;
+    Bash is not sandboxed. User-configured model and reasoning depth apply.
+    """
     return _start_delegation(task, context, CODING_PROFILE)
 
 @mcp.tool(annotations=_READONLY_AGENT_EXECUTION)
 def start_deepseek_readonly(task: str, context: str = "") -> str:
-    """Start a read-only job. The configured model and reasoning depth apply."""
+    """Start bounded static file investigation with steering/status/cancellation controls.
+    Read/Glob/Grep only, no shell or writes. Returns job_id; get_deepseek_result
+    supplies source observations and search limitations. One execution per workspace;
+    no inherited chat/web. User-configured model and reasoning depth apply.
+    """
     return _start_delegation(task, context, READONLY_PROFILE)
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -428,12 +434,14 @@ def cancel_deepseek(job_id: str) -> str:
     return _json({"ok": True, **payload})
 
 @mcp.tool(annotations=_RESULT_WITH_BOOKKEEPING)
-def get_deepseek_result(job_id: str) -> str:
-    """Return final result for a background DeepSeek job, or ready=false if running."""
+def get_deepseek_result(job_id: str) -> ReceiptResult:
+    """Retrieve worker claims and a bounded execution receipt, or ready=false if running.
+    Completion is not acceptance. Failed/cancelled runs retain available evidence.
+    """
     try:
         payload, usage_record = job_manager.result_with_usage_claim(job_id)
     except JobError as e:
-        return _json({"ok": False, "error": str(e)})
+        return failure_response(str(e))
 
     result = payload.get("result")
     if payload.get("ready") and payload.get("status") == "completed" and result:
@@ -448,7 +456,7 @@ def get_deepseek_result(job_id: str) -> str:
             task_length, usage_result = usage_record
             persisted = _record_usage(task_length, usage_result)
             job_manager.finish_usage_record(job_id, persisted)
-    return _json({"ok": True, **payload})
+    return as_mcp_result({"ok": True, **payload})
 
 
 def _record_usage(task_length: int, result: dict) -> bool:
@@ -480,11 +488,7 @@ def main() -> None:
     except (RuntimeError, JobError):
         raise SystemExit(1) from None
     _ensure_runtime_logging()
-    logger.info(
-        "deepseek-mcp v%s starting (mode=%s)",
-        __version__,
-        mode,
-    )
+    logger.info("deepseek-mcp v%s starting (mode=%s)", __version__, mode)
     try:
         mcp.run()
     except Exception as e:

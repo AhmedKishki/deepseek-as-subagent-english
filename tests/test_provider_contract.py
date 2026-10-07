@@ -65,6 +65,7 @@ class ProviderContractTests(unittest.TestCase):
             completion_tokens=0,
             budget_tokens=0,
             mutations=SimpleNamespace(add=lambda _record: None),
+            evidence=SimpleNamespace(add=lambda _observation: None),
         )
 
         _record_response(state, response)

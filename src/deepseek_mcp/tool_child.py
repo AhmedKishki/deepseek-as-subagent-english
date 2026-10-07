@@ -12,6 +12,7 @@ from .config import Config, HARD_MAX_RUN_SECONDS
 from .process_hardening import disable_core_dumps
 from .parent_liveness import wait_for_parent_loss_or_timeout
 from .resource_budget import MutationBudget, ResourceBudgetExceeded
+from .tool_evidence import bind_tool_evidence, encode_evidence
 from .tools import execute_tool
 from .transaction_journal import (
     JournalUpdatePublishedWarning,
@@ -137,6 +138,7 @@ def _execute(payload: dict, lease_fd: int | None) -> dict:
     budget = _budget(payload.get("mutation_budget"))
     config = _config(payload.get("config"))
     assert config.expected_workspace_identity is not None
+    observations: list[dict] = []
     with (
         bind_workspace_identity(config.expected_workspace_identity),
         bind_reporter(
@@ -147,6 +149,7 @@ def _execute(payload: dict, lease_fd: int | None) -> dict:
                 config, transaction_id, detail
             ),
         ),
+        bind_tool_evidence(observations.append),
     ):
         result = execute_tool(
             name,
@@ -156,7 +159,11 @@ def _execute(payload: dict, lease_fd: int | None) -> dict:
             mutation_budget=budget,
             max_bash_timeout=max_bash_timeout,
         )
-    return {"kind": "ok", "result": result, "mutation_used": budget.used}
+    response = {"kind": "ok", "result": result, "mutation_used": budget.used}
+    evidence = encode_evidence(observations)
+    if evidence:
+        response["evidence"] = evidence
+    return response
 
 
 def _persist_mutation_ready(

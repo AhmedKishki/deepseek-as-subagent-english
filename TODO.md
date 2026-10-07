@@ -25,6 +25,15 @@ Research baseline: [Kilo source at b1e7f34](https://github.com/Kilo-Org/kilocode
 - [ ] Detect repeated identical tool calls and consecutive malformed tool arguments, using Kilo's threshold-three guards as a starting point. Define bounded exceptions for legitimate repetition or steering.
 - [ ] Stop unproductive runs with a clear result for the orchestrator rather than leaving non-interactive workers waiting for approval. Keep turn, tool-call, time, and resource budgets as independent backstops.
 
+## Live observability and inspection
+
+- [ ] Design an opt-in local inspection service with a small browser UI and a bounded event stream. Let the user inspect a running DeepSeek job rather than seeing only its final answer. Evaluate an MCP-owned loopback HTTP service or a separate observer process; neither may create a second executor or bypass workspace leases.
+- [ ] Record server-observed lifecycle events with job IDs, ordered sequence numbers, timestamps, model/effort configuration, turns, tool categories, command exit/timeout outcomes, limits, retries, failures, and recovery state. Show elapsed time and remaining budgets so active work can be distinguished from a stalled run. Label provider-reported usage separately from host-observed facts.
+- [ ] Keep observable actions, worker messages, and server evidence distinct. Do not present worker claims as verified results, or promise access to hidden model reasoning. Link the live history to the final evidence receipt and show gaps, dropped events, and reconnect/retention limits explicitly.
+- [ ] Redact credentials, raw commands, file contents, task/context text, and sensitive paths by default. Any richer trace capture must require explicit user opt-in, bounded private storage, a retention policy, and deletion controls; never silently send traces to a remote analytics service.
+- [ ] Bind locally, authenticate access, validate browser origins, and prevent the UI from reading arbitrary files or serving outward symlinks. Keep observation read-only initially; any later steering/cancellation must use the existing permission and job-control APIs, never new execution privileges.
+- [ ] Test concurrent viewers, slow consumers/backpressure, reconnects, cancellation, worker/server crashes, bounded memory/disk use, and secret redaction before enabling the service. No inspector may expose provider credentials or weaken mutation recovery.
+
 ## External MCP servers
 
 - [ ] Add user-configured outbound MCP connections for the subagent, with explicit server/tool allowlists, credential isolation, bounded timeouts, cancellation, and lifecycle management.

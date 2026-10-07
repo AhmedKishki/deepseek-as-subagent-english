@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from .config import Config
 from .file_identity import ToolInputError, bounded_integer
 from .safety import SandboxViolation, check_command
+from .tool_evidence import emit_bash, emit_error
 
 MAX_TOOL_OUTPUT = 50_000
 MAX_BASH_TIMEOUT = 600
@@ -312,18 +313,21 @@ def _run_on_trusted_host(command: str, config: Config, timeout: int) -> _BashRes
     )
 
 
-def _command_request(args: dict, max_timeout: int | None) -> tuple[str, int] | str:
+def _command_request(args: dict, max_timeout: int | None):
     command = args.get("command", "")
     if not isinstance(command, str) or not command.strip():
-        return "ERROR: missing required 'command' argument"
+        return None, "ERROR: missing required 'command' argument", "invalid_input"
     try:
         check_command(command)
+    except SandboxViolation as exc:
+        return None, f"ERROR: {exc}", "denied"
+    try:
         timeout = _parse_timeout(args)
-    except (SandboxViolation, ToolInputError) as exc:
-        return f"ERROR: {exc}"
+    except ToolInputError as exc:
+        return None, f"ERROR: {exc}", "invalid_input"
     if max_timeout is not None:
         timeout = min(timeout, max(1, max_timeout))
-    return command, timeout
+    return (command, timeout), None, None
 
 
 def execute_bash(
@@ -333,17 +337,28 @@ def execute_bash(
     max_timeout: int | None = None,
 ) -> str:
     del lease_fd
-    request = _command_request(args, max_timeout)
-    if isinstance(request, str):
-        return request
-    command, timeout = request
+    parsed, error, category = _command_request(args, max_timeout)
+    if parsed is None:
+        emit_error("Bash", category)
+        return error
+    command, timeout = parsed
     try:
         result = _run_on_trusted_host(command, config, timeout)
     except (TrustedHostError, RuntimeError, TypeError, ValueError) as exc:
+        emit_error("Bash", "host_unavailable")
         return f"ERROR: trusted host unavailable: {exc}"
     if result.timed_out:
+        emit_bash(command, result, False)
         return f"ERROR: command timed out after {timeout}s; trusted-host process was terminated"
     try:
-        return _format_result(result)
+        output = _format_result(result)
     except Exception as exc:
+        emit_error("Bash", "internal")
         return f"ERROR: failed to format Bash result: {exc}"
+    combined_chars = len(_decode_stream(result.stdout, result.stdout_total)) + len(
+        _decode_stream(result.stderr, result.stderr_total)) + len(
+            f"[exit {result.returncode}]\n--- stdout ---\n")
+    if result.stderr:
+        combined_chars += len("\n--- stderr ---\n")
+    emit_bash(command, result, combined_chars > MAX_TOOL_OUTPUT)
+    return output

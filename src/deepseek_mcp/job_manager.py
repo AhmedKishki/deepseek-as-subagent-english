@@ -23,6 +23,7 @@ from .agent_loop import (
 )
 from .config import Config
 from .mutation_outcome import mutation_failure_message, records_from_result
+from .run_evidence import cancelled_receipt
 from .provider_retry import MutationOutcomeError
 from .transaction_recovery import TransactionRecoveryError, require_no_pending
 from .execution_lock import (
@@ -159,14 +160,15 @@ def _run_background_agent(
         )
     except MutationOutcomeError as error:
         status = "cancelled" if isinstance(error, AgentLoopCancelled) else "failed"
-        return _JobOutcome(status, None, str(error), True)
+        return _JobOutcome(status, error.delegation_result, str(error), True)
     except AgentLoopCancelled as error:
-        return _JobOutcome("cancelled", None, str(error))
+        return _JobOutcome("cancelled", error.delegation_result, str(error))
     except AgentLoopError as error:
-        return _JobOutcome("failed", None, str(error))
-    except Exception:
+        return _JobOutcome("failed", error.delegation_result, str(error))
+    except Exception as error:
         logger.error("DeepSeek background job failed category=internal")
-        return _JobOutcome("failed", None, "unexpected internal failure")
+        return _JobOutcome("failed", getattr(error, "delegation_result", None),
+                           "unexpected internal failure")
     return _JobOutcome("completed", result, None)
 
 
@@ -174,7 +176,7 @@ def _apply_cancelled_outcome(job: JobRecord, outcome: _JobOutcome) -> None:
     records = records_from_result(outcome.result)
     job.cancel_event.set()
     job.status = "cancelled"
-    job.result = None
+    job.result = cancelled_receipt(outcome.result)
     if records:
         job.error = mutation_failure_message(records, CANCELLED_ERROR)
     elif outcome.preserve_mutation_error:
@@ -349,7 +351,7 @@ class DeepSeekJobManager:
     @staticmethod
     def _result_payload_locked(job: JobRecord) -> dict[str, Any]:
         payload = job.snapshot()
-        payload["result"] = job.result if job.status == "completed" else None
+        payload["result"] = job.result if job.status in TERMINAL_STATES else None
         payload["ready"] = job.status in TERMINAL_STATES
         return payload
 
@@ -417,7 +419,7 @@ class DeepSeekJobManager:
                 )
             else:
                 job.status = desired_status
-                job.result = result if desired_status == "completed" else None
+                job.result = result
                 job.error = error
             job.finished_at = time.time()
             job.close_messages()

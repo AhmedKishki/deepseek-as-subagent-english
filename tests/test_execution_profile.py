@@ -124,7 +124,8 @@ class ExecutionProfileTests(unittest.TestCase):
                 response = asyncio.run(server.delegate_to_deepseek_readonly("review code"))
                 background = json.loads(server.start_deepseek_readonly("review code"))
 
-        self.assertIn("done", response)
+        self.assertEqual(response.structuredContent["result"]["final_message"], "done")
+        self.assertFalse(response.isError)
         self.assertTrue(background["ok"])
         self.assertEqual(run.call_args.args[1].allowed_tools, ["Read", "Glob", "Grep"])
 
