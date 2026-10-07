@@ -1,7 +1,6 @@
 # Codex adapter
 
-Use DeepSeek as a delegated execution agent while Codex owns the conversation,
-planning, judgment, and final verification.
+Use DeepSeek as a delegated execution agent while Codex owns the conversation, planning, judgment, and final verification.
 
 ## Install
 
@@ -11,62 +10,33 @@ Python 3.10–3.12 and a current Codex CLI are supported:
 bash adapters/codex/install.sh
 ```
 
-Python must already be installed; the adapter never bootstraps Python or `uv`
-from a remote script. The installer is transactional:
+Python must already be installed; the adapter never bootstraps Python or `uv` from a remote script. The installer is transactional:
 
 1. selects an installed Python 3.12, 3.11, or 3.10;
-2. builds a fresh, non-editable generation under
-   `~/.deepseek-mcp/codex-venvs/`;
-3. installs the exact distributions and hashes in `requirements.lock` without
-   upgrading `pip`, then runs a real MCP stdio initialize/list-tools/ping smoke test;
+2. builds a fresh, non-editable generation under `~/.deepseek-mcp/codex-venvs/`;
+3. installs the exact distributions and hashes in `requirements.lock` without upgrading `pip`, then runs a real MCP stdio initialize/list-tools/ping smoke test;
 4. creates a private, workspace-write-enabled DeepSeek config when absent;
-5. round-trip edits `~/.codex/config.toml`, preserving comments and custom
-   settings;
+5. round-trip edits `~/.codex/config.toml`, preserving comments and custom settings;
 6. verifies the Codex registration and rolls the config back on failure;
-7. prunes only adapter-owned generations, retaining the active generation and
-   the newest previous generation for recovery.
+7. prunes only adapter-owned generations, retaining the active generation and the newest previous generation for recovery.
 
-An existing `mcp_servers.deepseek` entry is replaced only when it has this
-adapter's ownership marker or its command is a strict direct generation under
-`~/.deepseek-mcp/codex-venvs/`. A project path that merely contains a familiar
-name is foreign and refused. Inspect it first, then use `--force-replace` only
-when replacing it is intentional:
+An existing `mcp_servers.deepseek` entry is replaced only when it has this adapter's ownership marker or its command is a strict direct generation under `~/.deepseek-mcp/codex-venvs/`. A project path that merely contains a familiar name is foreign and refused. Inspect it first, then use `--force-replace` only when replacing it is intentional:
 
 ```bash
 bash adapters/codex/install.sh --force-replace
 ```
 
-Normal upgrades preserve the adapter's documented approval, allowlist, and
-timeout policy. They fail closed if the existing launch table contains args,
-cwd, inline environment, unknown launch fields, or non-allowlisted forwarded
-environment variables; use `--force-replace` only after inspecting that state.
-That flag is a trust-boundary reset: it rebuilds a clean server table and does
-not preserve those launch customizations.
-It validates an existing DeepSeek runtime config before touching Codex. New
-installs enable coding Bash on the trusted host; read-only delegation needs no
-container runtime.
+Normal upgrades preserve the adapter's documented approval, allowlist, and timeout policy. They fail closed if the existing launch table contains args, cwd, inline environment, unknown launch fields, or non-allowlisted forwarded environment variables; use `--force-replace` only after inspecting that state. That flag is a trust-boundary reset: it rebuilds a clean server table and does not preserve those launch customizations. It validates an existing DeepSeek runtime config before touching Codex. New installs enable coding Bash on the trusted host; read-only delegation needs no container runtime.
 Fresh registrations use:
 
 - `default_tools_approval_mode = "writes"`;
 - `startup_timeout_sec = 20`;
 - `tool_timeout_sec = 18060` (5-hour run plus 60 seconds for safe cleanup);
-- an exact eleven-tool MCP allowlist, including both readonly delegation APIs
-  and durable recovery query/ack.
+- an exact eleven-tool MCP allowlist, including both readonly delegation APIs and durable recovery query/ack.
 
-Read-only MCP tools (`ping`, status) carry protocol annotations and do not need
-write approval. Delegation/control/cancellation are conservatively annotated as
-mutating. Result retrieval and recovery query perform local bookkeeping writes;
-the fresh config explicitly approves those plus exact recovery acknowledgement.
+Read-only MCP tools (`ping`, status) carry protocol annotations and do not need write approval. Delegation/control/cancellation are conservatively annotated as mutating. Result retrieval and recovery query perform local bookkeeping writes; the fresh config explicitly approves those plus exact recovery acknowledgement.
 
-For DeepSeek's hosted API, replace the key placeholder in
-`~/.deepseek-mcp/config.json` on POSIX. On Windows, leave the placeholder and
-set `DEEPSEEK_API_KEY` in the environment instead. A local loopback
-OpenAI-compatible endpoint needs no key; if it requires authentication, set
-`OPENAI_API_KEY` before starting Codex. The default DeepSeek capability
-set is `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, and `NotebookEdit`, so
-delegated coding tasks can modify the workspace and run bounded commands
-immediately after installation. Use the explicit read-only APIs for static
-file analysis; see [../../SECURITY.md](../../SECURITY.md).
+For DeepSeek's hosted API, replace the key placeholder in `~/.deepseek-mcp/config.json` on POSIX. On Windows, leave the placeholder and set `DEEPSEEK_API_KEY` in the environment instead. A local loopback OpenAI-compatible endpoint needs no key; if it requires authentication, set `OPENAI_API_KEY` before starting Codex. The default DeepSeek capability set is `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, and `NotebookEdit`, so delegated coding tasks can modify the workspace and run bounded commands immediately after installation. Use the explicit read-only APIs for static file analysis; see [../../SECURITY.md](../../SECURITY.md).
 
 Verify:
 
@@ -75,45 +45,32 @@ codex mcp get deepseek
 codex
 ```
 
-Then ask Codex to call the DeepSeek `ping` tool. `ping` validates registration
-and configuration loading; it does not spend DeepSeek API tokens or prove API
-credentials can complete a model request.
+Then ask Codex to call the DeepSeek `ping` tool. `ping` validates registration and configuration loading; it does not spend DeepSeek API tokens or prove API credentials can complete a model request.
 
 ## Delegation policy
 
-The MCP server publishes host instructions during initialization. Their first
-~512 characters are self-contained for clients that truncate server
-instructions. They tell Codex to:
+This English fork leaves model selection and reasoning depth to the user. Set `model` and `reasoning_effort` in `~/.deepseek-mcp/config.json`; the orchestrator cannot override them through delegation-tool arguments. See [Configure the model](../../README.md#configure-the-model) for configuration and migration details.
+
+The MCP server publishes host instructions during initialization. Their first ~512 characters are self-contained for clients that truncate server instructions. They tell Codex to:
 
 - delegate self-contained, execution-heavy work;
 - decide before reading large amounts of repository source when practical;
-- keep architecture, ambiguous root-cause analysis, security-sensitive
-  judgment, and tiny edits in the host;
-- pass all context explicitly because DeepSeek cannot see the parent chat or
-  repository instruction files;
+- keep architecture, ambiguous root-cause analysis, security-sensitive judgment, and tiny edits in the host;
+- pass all context explicitly because DeepSeek cannot see the parent chat or repository instruction files;
 - query recovery, verify files, and acknowledge exact transaction IDs after mutations;
 - verify delegated changes and tests.
 
-`instructions.md` can be copied into a project `AGENTS.md` when a stronger,
-project-specific policy is desired.
+`instructions.md` can be copied into a project `AGENTS.md` when a stronger, project-specific policy is desired.
 
 ## Delegation APIs
 
-Use coding delegation for changes, builds, tests, lint, Git, dependencies, or
-anything that could write the workspace:
+Use coding delegation for changes, builds, tests, lint, Git, dependencies, or anything that could write the workspace:
 
 ```text
 delegate_to_deepseek(task, context)
 ```
 
-This synchronous MCP request stays open until the run completes. The Codex
-adapter's default tool timeout is 18,060 seconds: the 18,000-second (5-hour)
-DeepSeek run limit plus 60 seconds for safe child cleanup and result delivery.
-`max_run_seconds` may be raised explicitly but is rejected above 172,800
-seconds (48 hours). For a synchronous run above five hours, raise Codex's
-`mcp_servers.deepseek.tool_timeout_sec` to at least `max_run_seconds + 60`; the
-server-side 48-hour ceiling still applies. Use the coding background API for
-work that needs steering:
+This synchronous MCP request stays open until the run completes. The Codex adapter's default tool timeout is 18,060 seconds: the 18,000-second (5-hour) DeepSeek run limit plus 60 seconds for safe child cleanup and result delivery. `max_run_seconds` may be raised explicitly but is rejected above 172,800 seconds (48 hours). For a synchronous run above five hours, raise Codex's `mcp_servers.deepseek.tool_timeout_sec` to at least `max_run_seconds + 60`; the server-side 48-hour ceiling still applies. Use the coding background API for work that needs steering:
 
 ```text
 start_deepseek(task, context) -> job_id
@@ -123,18 +80,14 @@ cancel_deepseek(job_id)
 get_deepseek_result(job_id)
 ```
 
-For clearly read-only investigation—code reading/search, review, log analysis,
-root-cause analysis, and call-graph tracing—use the fixed file-analysis profile:
+For clearly read-only investigation—code reading/search, review, log analysis, root-cause analysis, and call-graph tracing—use the fixed file-analysis profile:
 
 ```text
 delegate_to_deepseek_readonly(task, context)
 start_deepseek_readonly(task, context) -> job_id
 ```
 
-The readonly APIs provide only Read, Glob, and Grep. They expose neither Bash
-nor workspace mutation and work without Docker/Podman. Do not pass a mode,
-backend, or permission argument; the selected API freezes the profile for the
-job.
+The readonly APIs provide only Read, Glob, and Grep. They expose neither Bash nor workspace mutation and work without Docker/Podman. Do not pass a mode, backend, or permission argument; the selected API freezes the profile for the job.
 
 For either `start_*` API, use the same job controls:
 
@@ -145,21 +98,11 @@ cancel_deepseek(job_id)
 get_deepseek_result(job_id)
 ```
 
-Steering is applied at model/tool safe points. Cancellation wakes retry backoff
-and promptly terminates an in-flight provider or local-tool subprocess. A
-cancellation accepted before terminal commit always wins that atomic commit; a
-later request returns `cancel_accepted=false`.
+Steering is applied at model/tool safe points. Cancellation wakes retry backoff and promptly terminates an in-flight provider or local-tool subprocess. A cancellation accepted before terminal commit always wins that atomic commit; a later request returns `cancel_accepted=false`.
 
-An OS-backed lease permits one DeepSeek execution per canonical workspace even
-when several Codex/MCP processes exist. Different workspaces can run
-independently. Background job state is held in the current MCP process only:
-collect its result before closing or restarting the Codex task.
+An OS-backed lease permits one DeepSeek execution per canonical workspace even when several Codex/MCP processes exist. Different workspaces can run independently. Background job state is held in the current MCP process only: collect its result before closing or restarting the Codex task.
 
-Every workspace mutation is journaled before commit. After a result reports
-mutations, call `get_deepseek_recovery`, verify each file, then call
-`acknowledge_deepseek_mutations` with the exact reviewed IDs. After cancellation,
-disconnect, or restart, query recovery before retrying. New delegation is blocked
-until pending records are acknowledged; recovery does not need a valid API key.
+File mutations through Write, Edit, and NotebookEdit are journaled before commit. Trusted-host Bash changes are not journaled; inspect the workspace independently after an interrupted coding run. After a result reports mutations, call `get_deepseek_recovery`, verify each file, then call `acknowledge_deepseek_mutations` with the exact reviewed IDs. After cancellation, disconnect, or restart, query recovery before retrying. New delegation is blocked until pending records are acknowledged; recovery does not need a valid API key.
 
 ## Manual registration
 
@@ -173,15 +116,9 @@ python3.12 -m venv ~/.deepseek-mcp/manual-venv
   ~/.deepseek-mcp/manual-venv/bin/deepseek-mcp
 ```
 
-Keep the runtime outside any workspace that may enable `Write`, `Edit`, or
-`NotebookEdit`. The server rejects mutation tools when its interpreter or
-package is inside the delegated workspace, preventing that workspace from
-replacing code imported by a privileged provider child.
+Keep the runtime outside any workspace that may enable `Write`, `Edit`, or `NotebookEdit`. The server rejects mutation tools when its interpreter or package is inside the delegated workspace, preventing that workspace from replacing code imported by a privileged provider child.
 
-Then adapt `config.toml.example` into `~/.codex/config.toml`. Direct TOML config
-is recommended over a bare `codex mcp add` because the example includes
-approval and timeout policy. Official Codex MCP settings are documented at
-<https://developers.openai.com/codex/mcp>.
+Then adapt `config.toml.example` into `~/.codex/config.toml`. Direct TOML config is recommended over a bare `codex mcp add` because the example includes approval and timeout policy. Official Codex MCP settings are documented at <https://developers.openai.com/codex/mcp>.
 
 ## Disable or uninstall
 
@@ -197,10 +134,7 @@ Remove only this adapter's owned Codex entry:
 bash adapters/codex/uninstall.sh
 ```
 
-The uninstaller preserves `~/.deepseek-mcp/config.json`, logs, and installed
-generation environments. Successful installs automatically keep only the
-active generation and the newest previous generation. The uninstaller refuses
-to remove a foreign same-name server unless `--force` is explicitly supplied.
+The uninstaller preserves `~/.deepseek-mcp/config.json`, logs, and installed generation environments. Successful installs automatically keep only the active generation and the newest previous generation. The uninstaller refuses to remove a foreign same-name server unless `--force` is explicitly supplied.
 
 ## Tests
 
@@ -209,6 +143,4 @@ to remove a foreign same-name server unless `--force` is explicitly supplied.
 bash -n adapters/codex/install.sh adapters/codex/uninstall.sh
 ```
 
-The suite covers cancellation/finalization races, cross-process workspace
-leases, MCP annotations and stdio protocol flow, TOML preservation/ownership/
-rollback and safe default capabilities.
+The suite covers cancellation/finalization races, cross-process workspace leases, MCP annotations and stdio protocol flow, TOML preservation/ownership/rollback and safe default capabilities.

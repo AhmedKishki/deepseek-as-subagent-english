@@ -27,7 +27,7 @@ dependencies = [
     # v1 maintenance line until a dedicated v2 migration is completed.
     "mcp[cli]>=1.28,<2",
     "openai>=1.40.0,<3",
-    "httpx[socks]>=0.27.0,<1",  # 兼容 SOCKS 代理（科学上网环境常见）
+    "httpx[socks]>=0.27.0,<1",  # SOCKS proxy support (common where network access is restricted)
     "google-re2>=1.1.20251105,<1.2",
 ]
 
@@ -35,9 +35,9 @@ dependencies = [
 codex = ["tomlkit>=0.13,<1"]
 
 [project.urls]
-Homepage = "https://github.com/PsChina/deepseek-as-subagent"
-Repository = "https://github.com/PsChina/deepseek-as-subagent"
-Issues = "https://github.com/PsChina/deepseek-as-subagent/issues"
+Homepage = "https://github.com/AhmedKishki/deepseek-as-subagent-english"
+Repository = "https://github.com/AhmedKishki/deepseek-as-subagent-english"
+Issues = "https://github.com/AhmedKishki/deepseek-as-subagent-english/issues"
 
 [project.scripts]
 deepseek-mcp = "deepseek_mcp.server:main"

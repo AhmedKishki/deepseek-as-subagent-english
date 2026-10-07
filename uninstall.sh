@@ -49,7 +49,7 @@ find_python() {
 }
 
 if ! find_python; then
-    echo "✗ PATH 中没有受支持的 Python 3.10–3.12，无法安全验证卸载路径。" >&2
+    echo "✗ No supported Python 3.10–3.12 found in PATH; cannot safely validate the uninstall paths." >&2
     exit 1
 fi
 $PYTHON_CMD "$PATH_GUARD" validate-private-dirs "$HOME" \
@@ -175,7 +175,7 @@ restore_quarantined_asset() {
     local quarantined="$1" dst="$2"
     mv -n -- "$quarantined" "$dst" 2>/dev/null || true
     if [ -e "$quarantined" ] || [ -L "$quarantined" ]; then
-        echo "✗ 竞态资产已保留在 $quarantined；未删除任何内容。" >&2
+        echo "✗ The raced asset was preserved at $quarantined; nothing was deleted." >&2
         return 1
     fi
 }
@@ -205,11 +205,11 @@ stage_owned_asset_removal() {
     if ! mv -n -- "$dst" "$quarantined" 2>/dev/null; then
         clear_staged_quarantine "$label"
         rmdir "$quarantine" 2>/dev/null || true
-        echo "✗ $dst 在卸载期间发生变化，已拒绝删除。" >&2
+        echo "✗ $dst changed during uninstall; deletion refused." >&2
         return 1
     fi
     if [ -e "$dst" ] || [ -L "$dst" ]; then
-        echo "✗ $dst 在卸载期间发生变化，已拒绝删除。" >&2
+        echo "✗ $dst changed during uninstall; deletion refused." >&2
         return 1
     fi
     if ! asset_is_current "$label" "$src" "$quarantined" \
@@ -219,7 +219,7 @@ stage_owned_asset_removal() {
             clear_staged_quarantine "$label"
             rmdir "$quarantine" 2>/dev/null || true
         fi
-        echo "✗ $dst 在卸载期间发生变化，已拒绝删除。" >&2
+        echo "✗ $dst changed during uninstall; deletion refused." >&2
         return 1
     fi
 }
@@ -256,7 +256,7 @@ discard_staged_helpers() {
         if rm -rf -- "$quarantine"; then
             clear_staged_quarantine "$label"
         else
-            echo "warning: helper quarantine 清理失败: $quarantine" >&2
+            echo "warning: failed to clean up helper quarantine: $quarantine" >&2
         fi
     done
 }
@@ -267,7 +267,7 @@ SKILL_QUARANTINE="" COMMAND_QUARANTINE=""
 release_install_lock() {
     if [ "$LOCK_HELD" -eq 1 ]; then
         rmdir "$INSTALL_LOCK" \
-            || echo "warning: 无法释放安装锁: $INSTALL_LOCK" >&2
+            || echo "warning: could not release the install lock: $INSTALL_LOCK" >&2
         LOCK_HELD=0
     fi
 }
@@ -294,12 +294,12 @@ on_exit() {
         && [ "$UNINSTALL_SUCCEEDED" -ne 1 ]; then
         trap '' INT TERM HUP
         if ! restore_uninstall_registration; then
-            echo "✗ 卸载失败且无法恢复原 Claude 注册；请人工核验。" >&2
+            echo "✗ Uninstall failed and the original Claude registration could not be restored; verify manually." >&2
         fi
     fi
     if [ "$UNINSTALL_SUCCEEDED" -ne 1 ]; then
         restore_staged_helpers \
-            || echo "✗ 卸载失败且 helper 恢复不完整；请查看 quarantine。" >&2
+            || echo "✗ Uninstall failed and helper recovery is incomplete; check the quarantine." >&2
     fi
     release_install_lock
     return "$exit_code"
@@ -309,76 +309,76 @@ trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 
 if ! mkdir "$INSTALL_LOCK" 2>/dev/null; then
-    echo "✗ 另一个安装/卸载事务正在运行，或留下了未确认的锁: $INSTALL_LOCK" >&2
+    echo "✗ Another install/uninstall transaction is running, or an unacknowledged lock remains: $INSTALL_LOCK" >&2
     exit 1
 fi
 LOCK_HELD=1
 
 REGISTERED_COMMAND=""
 if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
-    echo "✗ claude CLI 不在 PATH，无法核验注册；未做任何删除。" >&2
-    echo "  修复 PATH 或设置 DEEPSEEK_CLAUDE_BIN 后重试。" >&2
+    echo "✗ claude CLI is not in PATH; cannot verify the registration; nothing was deleted." >&2
+    echo "  Fix PATH or set DEEPSEEK_CLAUDE_BIN and retry." >&2
     exit 1
 fi
 REGISTERED_SNAPSHOT="$(registration_snapshot)" || {
-    echo "✗ deepseek MCP 注册不属于此安装器，或无法安全解析；未做任何删除。" >&2
+    echo "✗ The deepseek MCP registration is not owned by this installer, or cannot be parsed safely; nothing was deleted." >&2
     exit 1
 }
 case "$REGISTERED_SNAPSHOT" in
     present:*) REGISTERED_COMMAND="${REGISTERED_SNAPSHOT#present:}" ;;
     absent) REGISTERED_COMMAND="" ;;
-    *) echo "✗ 无法读取 deepseek MCP 注册。" >&2; exit 1 ;;
+    *) echo "✗ Could not read the deepseek MCP registration." >&2; exit 1 ;;
 esac
 
 # Preflight every asset before the first destructive operation.
 SKILL_STATE="$(asset_state skill "$SKILL_SRC" "$SKILL_DST")" || {
-    echo "✗ $SKILL_DST 不属于此安装器；未做任何删除。" >&2
+    echo "✗ $SKILL_DST is not owned by this installer; nothing was deleted." >&2
     exit 1
 }
 COMMAND_STATE="$(asset_state command "$COMMAND_SRC" "$COMMAND_DST")" || {
-    echo "✗ $COMMAND_DST 不属于此安装器；未做任何删除。" >&2
+    echo "✗ $COMMAND_DST is not owned by this installer; nothing was deleted." >&2
     exit 1
 }
 
-echo "[1/4] 删 skill / command 部署..."
+echo "[1/4] Removing skill / command deployments..."
 stage_owned_asset_removal skill "$SKILL_SRC" "$SKILL_DST" "$SKILL_STATE"
 stage_owned_asset_removal command "$COMMAND_SRC" "$COMMAND_DST" "$COMMAND_STATE"
-echo "       已删除所有权匹配的资产"
+echo "       Removed assets whose ownership matched"
 
-echo "[2/4] 从 Claude Code 移除 mcp..."
+echo "[2/4] Removing mcp from Claude Code..."
 if ! registration_matches_expected "$REGISTERED_COMMAND"; then
-    echo "✗ deepseek MCP 注册在卸载期间发生变化；未移除该注册。" >&2
+    echo "✗ The deepseek MCP registration changed during uninstall; it was not removed." >&2
     exit 1
 elif [ -z "$REGISTERED_COMMAND" ]; then
-    echo "       未注册，跳过"
+    echo "       Not registered; skipping"
 else
     REGISTRATION_TRANSACTION=1
     "$CLAUDE_BIN" mcp remove deepseek -s user >/dev/null 2>&1
     registration_matches_expected "" || {
-        echo "✗ 无法确认 deepseek MCP 注册已移除。" >&2
+        echo "✗ Could not confirm the deepseek MCP registration was removed." >&2
         exit 1
     }
-    echo "       已移除本安装器的注册"
+    echo "       Removed this installer's registration"
 fi
 
-echo "[3/4] 配置目录:"
-echo "       $CONFIG_DIR 仍存在（含 API key、日志和运行时）"
-echo "       要删请在确认内容后手动处理。"
+echo "[3/4] Config directory:"
+echo "       $CONFIG_DIR still exists (contains the API key, logs, and runtime)"
+echo "       To delete it, first review its contents and remove it manually."
 
-echo "[4/4] 旧版可能遗留的 shell rc pure alias:"
+echo "[4/4] Legacy shell rc pure aliases that older versions may have left behind:"
 FOUND_RC=0
 for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
     if [ -f "$rc" ] && grep -q "===== deepseek-orchestrator:" "$rc" 2>/dev/null; then
-        echo "       $rc 里仍有，请手动删除 deepseek-orchestrator 段落"
+        echo "       still present in $rc; manually remove the deepseek-orchestrator block"
         FOUND_RC=1
     fi
 done
-[ "$FOUND_RC" = "0" ] && echo "       未发现"
+[ "$FOUND_RC" = "0" ] && echo "       None found"
 
 UNINSTALL_SUCCEEDED=1
 REGISTRATION_TRANSACTION=0
 discard_staged_helpers
 
 echo ""
-echo "✅ 可验证为本安装器所有的 Claude 注册与资产已清理"
-echo "   项目目录 $PROJECT_ROOT 和用户配置均未删除"
+echo "✅ Claude registrations and assets verifiably owned by this installer have been cleaned up"
+echo "   The project directory $PROJECT_ROOT and user configuration were not deleted"

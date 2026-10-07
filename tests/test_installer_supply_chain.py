@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -293,6 +294,19 @@ def _seed_legacy_install(home: Path, old_command: Path, tools: list[str]) -> Non
     config.chmod(0o600)
 
 
+def _seed_deployed_helpers(project: Path, home: Path) -> tuple[Path, Path]:
+    """Seed the deployed helper shape: skill symlink, command regular file."""
+    skill = home / ".claude" / "skills" / "delegate-to-deepseek"
+    command = home / ".claude" / "commands" / "ds.md"
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    command.parent.mkdir(parents=True, exist_ok=True)
+    skill.symlink_to(
+        project / "skills" / "delegate-to-deepseek", target_is_directory=True
+    )
+    shutil.copy2(project / "commands" / "ds.md", command)
+    return skill, command
+
+
 class InstallerSupplyChainTests(unittest.TestCase):
     def test_fresh_installers_enable_complete_default_coding_tools(self) -> None:
         for name in ("install.sh", "adapters/codex/install.sh"):
@@ -465,7 +479,7 @@ class InstallerSupplyChainTests(unittest.TestCase):
             self.assertFalse(any(call.startswith("mcp add ") for call in calls))
             generations = home / ".deepseek-mcp" / "claude-venvs"
             self.assertEqual(len(list(generations.glob("generation.*"))), 1)
-            self.assertIn("保留候选运行时", result.stderr)
+            self.assertIn("keeping the candidate runtime", result.stderr)
 
     @unittest.skipIf(os.name == "nt", "POSIX signal semantics")
     def test_term_after_remove_restores_registration_and_cleans_candidate(self) -> None:
@@ -495,15 +509,7 @@ class InstallerSupplyChainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             project, home, fake_bin, old_command = _installer_fixture(Path(tmpdir))
             _seed_legacy_install(home, old_command, DEFAULT_FILE_TOOLS)
-            skill = home / ".claude" / "skills" / "delegate-to-deepseek"
-            command = home / ".claude" / "commands" / "ds.md"
-            skill.parent.mkdir(parents=True)
-            command.parent.mkdir(parents=True)
-            skill.symlink_to(
-                project / "skills" / "delegate-to-deepseek",
-                target_is_directory=True,
-            )
-            command.symlink_to(project / "commands" / "ds.md")
+            skill, command = _seed_deployed_helpers(project, home)
 
             result = _run_installer(
                 project, home, fake_bin, old_command, FAKE_SIGNAL_AFTER_MV="1"
@@ -512,7 +518,12 @@ class InstallerSupplyChainTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertTrue(skill.is_symlink())
             self.assertEqual(skill.resolve(), (project / "skills" / "delegate-to-deepseek").resolve())
-            self.assertTrue(command.is_symlink())
+            self.assertTrue(command.is_file())
+            self.assertFalse(command.is_symlink())
+            self.assertEqual(
+                command.read_text(encoding="utf-8"),
+                (project / "commands" / "ds.md").read_text(encoding="utf-8"),
+            )
             self.assertEqual(
                 list((home / ".claude" / "skills").glob("*.deepseek-mcp.*")), []
             )
@@ -530,7 +541,7 @@ class InstallerSupplyChainTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             helper_root = home / ".deepseek-mcp" / "claude-helpers"
             self.assertEqual(list(helper_root.glob("generation.*")), [])
-            self.assertIn("无法安全创建 Claude helper generation", result.stderr)
+            self.assertIn("could not safely create the Claude helper generation", result.stderr)
 
     @unittest.skipIf(os.name == "nt", "Git Bash paths differ from native Python paths")
     def test_installer_does_not_modify_shell_startup_files(self) -> None:
@@ -582,7 +593,7 @@ class InstallerSupplyChainTests(unittest.TestCase):
                 calls_before = (home / "claude.log").read_text().splitlines()
                 second = _run_installer(project, home, fake_bin, old_command)
                 self.assertNotEqual(second.returncode, 0, second.stdout)
-                self.assertIn("安装/卸载事务", second.stderr)
+                self.assertIn("install/uninstall transaction", second.stderr)
                 self.assertEqual(Path((home / "claude.state").read_text()), active)
                 self.assertTrue(active.is_file())
                 self.assertEqual(
@@ -645,7 +656,7 @@ class InstallerSupplyChainTests(unittest.TestCase):
                     self.assertNotEqual(
                         (home / "claude.state").read_text(), str(old_command)
                     )
-                    self.assertIn("核心 MCP 已安装", result.stdout)
+                    self.assertIn("Core MCP installed", result.stdout)
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertTrue(skill.is_symlink())
@@ -661,19 +672,170 @@ class InstallerSupplyChainTests(unittest.TestCase):
                     )
 
     @unittest.skipIf(os.name == "nt", "Git Bash paths differ from native Python paths")
+    def test_published_command_is_a_regular_file_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project, home, fake_bin, old_command = _installer_fixture(Path(tmpdir))
+            _seed_legacy_install(home, old_command, DEFAULT_FILE_TOOLS)
+
+            result = _run_installer(project, home, fake_bin, old_command)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            skill = home / ".claude" / "skills" / "delegate-to-deepseek"
+            command = home / ".claude" / "commands" / "ds.md"
+            self.assertTrue(skill.is_symlink())
+            self.assertTrue(command.is_file())
+            self.assertFalse(command.is_symlink())
+            self.assertEqual(
+                command.read_text(encoding="utf-8"),
+                (project / "commands" / "ds.md").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                sorted(entry.name for entry in command.parent.iterdir()), ["ds.md"]
+            )
+
+    @unittest.skipIf(os.name == "nt", "Git Bash paths differ from native Python paths")
+    def test_published_regular_command_is_upgraded_but_modified_copy_is_rejected(self) -> None:
+        historical = subprocess.check_output(
+            ["git", "show", "HEAD:commands/ds.md"], cwd=ROOT, text=True
+        )
+        for modified in (False, True):
+            with self.subTest(modified=modified), tempfile.TemporaryDirectory() as tmpdir:
+                project, home, fake_bin, old_command = _installer_fixture(Path(tmpdir))
+                _seed_legacy_install(home, old_command, DEFAULT_FILE_TOOLS)
+                command = home / ".claude" / "commands" / "ds.md"
+                command.parent.mkdir(parents=True)
+                command.write_text(
+                    historical + ("\n# user change\n" if modified else ""),
+                    encoding="utf-8",
+                )
+
+                result = _run_installer(project, home, fake_bin, old_command)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(command.is_file())
+                self.assertFalse(command.is_symlink())
+                if modified:
+                    self.assertIn("# user change", command.read_text(encoding="utf-8"))
+                else:
+                    self.assertEqual(
+                        command.read_text(encoding="utf-8"),
+                        (project / "commands" / "ds.md").read_text(encoding="utf-8"),
+                    )
+
+    @unittest.skipIf(os.name == "nt", "POSIX signal semantics")
+    def test_term_after_command_file_publish_restores_the_previous_regular_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project, home, fake_bin, old_command = _installer_fixture(Path(tmpdir))
+            _seed_legacy_install(home, old_command, DEFAULT_FILE_TOOLS)
+            command = home / ".claude" / "commands" / "ds.md"
+            command.parent.mkdir(parents=True)
+            previous = subprocess.check_output(
+                ["git", "show", "HEAD:commands/ds.md"], cwd=ROOT, text=True
+            )
+            command.write_text(previous, encoding="utf-8")
+
+            result = _run_installer(
+                project, home, fake_bin, old_command, FAKE_SIGNAL_AFTER_MV="1"
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertTrue(command.is_file())
+            self.assertFalse(command.is_symlink())
+            self.assertEqual(command.read_text(encoding="utf-8"), previous)
+            self.assertEqual(
+                list(command.parent.glob("*.deepseek-mcp.*")), []
+            )
+
+    @unittest.skipIf(os.name == "nt", "Git Bash paths differ from native Python paths")
+    def test_modified_regular_command_is_preserved_by_install_and_uninstall(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project, home, fake_bin, old_command = _installer_fixture(Path(tmpdir))
+            _seed_legacy_install(home, old_command, DEFAULT_FILE_TOOLS)
+            command = home / ".claude" / "commands" / "ds.md"
+            command.parent.mkdir(parents=True)
+            command.write_text("user modified command\n", encoding="utf-8")
+
+            installed = _run_installer(project, home, fake_bin, old_command)
+
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            self.assertEqual(
+                command.read_text(encoding="utf-8"), "user modified command\n"
+            )
+            self.assertTrue(command.is_file())
+
+            removed = _run_uninstaller(project, home, fake_bin, old_command)
+
+            self.assertNotEqual(removed.returncode, 0, removed.stdout)
+            self.assertEqual(
+                command.read_text(encoding="utf-8"), "user modified command\n"
+            )
+            self.assertTrue(command.is_file())
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode semantics")
+    def test_group_writable_skills_dir_is_rejected_with_actionable_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project, home, fake_bin, old_command = _installer_fixture(Path(tmpdir))
+            _seed_legacy_install(home, old_command, DEFAULT_FILE_TOOLS)
+            skills = home / ".claude" / "skills"
+            skills.mkdir(parents=True)
+            skills.chmod(0o775)
+
+            result = _run_installer(project, home, fake_bin, old_command)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(os.stat(skills).st_mode & 0o777, 0o775)
+            self.assertIn("could not secure the Claude skill path", result.stderr)
+            self.assertIn("chmod 700", result.stderr)
+            self.assertIn(str(skills), result.stderr)
+            self.assertFalse((skills / "delegate-to-deepseek").exists())
+            command = home / ".claude" / "commands" / "ds.md"
+            self.assertTrue(command.is_file())
+            self.assertFalse(command.is_symlink())
+            self.assertEqual(
+                command.read_text(encoding="utf-8"),
+                (project / "commands" / "ds.md").read_text(encoding="utf-8"),
+            )
+
+    def test_published_digests_accept_historical_and_translated_assets(self) -> None:
+        scripts = ROOT / "scripts"
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        import installer_asset_guard
+
+        for label, relative in (
+            ("skill", "skills/delegate-to-deepseek/SKILL.md"),
+            ("command", "commands/ds.md"),
+        ):
+            with self.subTest(label=label):
+                accepted = installer_asset_guard.PUBLISHED_DIGESTS[label]
+                self.assertTrue(accepted, label)
+                for digest in accepted:
+                    self.assertRegex(digest, r"^[0-9a-f]{64}$", digest)
+                translated = hashlib.sha256((ROOT / relative).read_bytes()).hexdigest()
+                self.assertIn(translated, accepted, f"translated {label} not accepted")
+                historical = hashlib.sha256(
+                    subprocess.check_output(
+                        ["git", "show", f"HEAD:{relative}"], cwd=ROOT
+                    )
+                ).hexdigest()
+                self.assertIn(historical, accepted, f"historical {label} not accepted")
+                self.assertGreaterEqual(len(accepted), 2, label)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "skill").mkdir()
+            (root / "skill" / "SKILL.md").write_bytes(b"unpublished skill")
+            (root / "ds.md").write_bytes(b"unpublished command")
+            for label, path in (("skill", root / "skill"), ("command", root / "ds.md")):
+                with self.assertRaises(installer_asset_guard.AssetGuardError):
+                    installer_asset_guard.verify_published(label, path)
+
+    @unittest.skipIf(os.name == "nt", "Git Bash paths differ from native Python paths")
     def test_uninstall_without_claude_cli_preserves_registration_and_assets(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             project, home, fake_bin, old_command = _installer_fixture(Path(tmpdir))
             _seed_legacy_install(home, old_command, DEFAULT_FILE_TOOLS)
-            skill = home / ".claude" / "skills" / "delegate-to-deepseek"
-            command = home / ".claude" / "commands" / "ds.md"
-            skill.parent.mkdir(parents=True)
-            command.parent.mkdir(parents=True)
-            skill.symlink_to(
-                project / "skills" / "delegate-to-deepseek",
-                target_is_directory=True,
-            )
-            command.symlink_to(project / "commands" / "ds.md")
+            skill, command = _seed_deployed_helpers(project, home)
 
             result = _run_uninstaller(
                 project,
@@ -686,8 +848,9 @@ class InstallerSupplyChainTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertEqual((home / "claude.state").read_text(), str(old_command))
             self.assertTrue(skill.is_symlink())
-            self.assertTrue(command.is_symlink())
-            self.assertIn("未做任何删除", result.stderr)
+            self.assertTrue(command.is_file())
+            self.assertFalse(command.is_symlink())
+            self.assertIn("nothing was deleted", result.stderr)
 
     def test_key_material_is_outside_xtrace_window(self) -> None:
         script = (ROOT / "install.sh").read_text(encoding="utf-8")
@@ -706,12 +869,7 @@ class InstallerSupplyChainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             project, home, fake_bin, old_command = _installer_fixture(Path(tmpdir))
             _seed_legacy_install(home, old_command, DEFAULT_FILE_TOOLS)
-            skill = home / ".claude" / "skills" / "delegate-to-deepseek"
-            command = home / ".claude" / "commands" / "ds.md"
-            skill.parent.mkdir(parents=True)
-            command.parent.mkdir(parents=True)
-            skill.symlink_to(project / "skills" / "delegate-to-deepseek", target_is_directory=True)
-            command.symlink_to(project / "commands" / "ds.md")
+            skill, command = _seed_deployed_helpers(project, home)
             foreign = home / "foreign" / "deepseek-mcp"
             (home / "claude.state").write_text(str(foreign), encoding="utf-8")
 
@@ -720,7 +878,8 @@ class InstallerSupplyChainTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertEqual((home / "claude.state").read_text(), str(foreign))
             self.assertTrue(skill.is_symlink())
-            self.assertTrue(command.is_symlink())
+            self.assertTrue(command.is_file())
+            self.assertFalse(command.is_symlink())
             self.assertEqual(
                 (home / "claude.log").read_text().splitlines(), ["mcp get deepseek"]
             )
@@ -733,14 +892,15 @@ class InstallerSupplyChainTests(unittest.TestCase):
             skill.mkdir(parents=True)
             (skill / "SKILL.md").write_text("user-owned\n", encoding="utf-8")
             command.parent.mkdir(parents=True)
-            command.symlink_to(project / "commands" / "ds.md")
+            shutil.copy2(project / "commands" / "ds.md", command)
 
             result = _run_uninstaller(project, home, fake_bin, old_command)
 
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertEqual((home / "claude.state").read_text(), str(old_command))
             self.assertTrue((skill / "SKILL.md").is_file())
-            self.assertTrue(command.is_symlink())
+            self.assertTrue(command.is_file())
+            self.assertFalse(command.is_symlink())
             calls = (home / "claude.log").read_text().splitlines()
             self.assertNotIn("mcp remove deepseek -s user", calls)
 
@@ -766,12 +926,7 @@ class InstallerSupplyChainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             project, home, fake_bin, old_command = _installer_fixture(Path(tmpdir))
             _seed_legacy_install(home, old_command, DEFAULT_FILE_TOOLS)
-            skill = home / ".claude" / "skills" / "delegate-to-deepseek"
-            command = home / ".claude" / "commands" / "ds.md"
-            skill.parent.mkdir(parents=True)
-            command.parent.mkdir(parents=True)
-            skill.symlink_to(project / "skills" / "delegate-to-deepseek", target_is_directory=True)
-            command.symlink_to(project / "commands" / "ds.md")
+            skill, command = _seed_deployed_helpers(project, home)
 
             result = _run_uninstaller(project, home, fake_bin, old_command)
 
@@ -788,15 +943,7 @@ class InstallerSupplyChainTests(unittest.TestCase):
             project, home, fake_bin, old_command = _installer_fixture(Path(tmpdir))
             _seed_legacy_install(home, old_command, DEFAULT_FILE_TOOLS)
             foreign = home / "foreign" / "deepseek-mcp"
-            skill = home / ".claude" / "skills" / "delegate-to-deepseek"
-            command = home / ".claude" / "commands" / "ds.md"
-            skill.parent.mkdir(parents=True)
-            command.parent.mkdir(parents=True)
-            skill.symlink_to(
-                project / "skills" / "delegate-to-deepseek",
-                target_is_directory=True,
-            )
-            command.symlink_to(project / "commands" / "ds.md")
+            skill, command = _seed_deployed_helpers(project, home)
 
             result = _run_uninstaller(
                 project,
@@ -810,7 +957,8 @@ class InstallerSupplyChainTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertEqual((home / "claude.state").read_text(), str(foreign))
             self.assertTrue(skill.is_symlink())
-            self.assertTrue(command.is_symlink())
+            self.assertTrue(command.is_file())
+            self.assertFalse(command.is_symlink())
             calls = (home / "claude.log").read_text().splitlines()
             self.assertNotIn("mcp remove deepseek -s user", calls)
 
@@ -819,15 +967,7 @@ class InstallerSupplyChainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             project, home, fake_bin, old_command = _installer_fixture(Path(tmpdir))
             _seed_legacy_install(home, old_command, DEFAULT_FILE_TOOLS)
-            skill = home / ".claude" / "skills" / "delegate-to-deepseek"
-            command = home / ".claude" / "commands" / "ds.md"
-            skill.parent.mkdir(parents=True)
-            command.parent.mkdir(parents=True)
-            skill.symlink_to(
-                project / "skills" / "delegate-to-deepseek",
-                target_is_directory=True,
-            )
-            command.symlink_to(project / "commands" / "ds.md")
+            skill, command = _seed_deployed_helpers(project, home)
 
             result = _run_uninstaller(
                 project, home, fake_bin, old_command, FAKE_FAIL_REMOVE="1"
@@ -836,22 +976,15 @@ class InstallerSupplyChainTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertEqual((home / "claude.state").read_text(), str(old_command))
             self.assertTrue(skill.is_symlink())
-            self.assertTrue(command.is_symlink())
+            self.assertTrue(command.is_file())
+            self.assertFalse(command.is_symlink())
 
     @unittest.skipIf(os.name == "nt", "POSIX signal semantics")
     def test_uninstall_term_after_helper_move_restores_all_assets(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             project, home, fake_bin, old_command = _installer_fixture(Path(tmpdir))
             _seed_legacy_install(home, old_command, DEFAULT_FILE_TOOLS)
-            skill = home / ".claude" / "skills" / "delegate-to-deepseek"
-            command = home / ".claude" / "commands" / "ds.md"
-            skill.parent.mkdir(parents=True)
-            command.parent.mkdir(parents=True)
-            skill.symlink_to(
-                project / "skills" / "delegate-to-deepseek",
-                target_is_directory=True,
-            )
-            command.symlink_to(project / "commands" / "ds.md")
+            skill, command = _seed_deployed_helpers(project, home)
 
             result = _run_uninstaller(
                 project, home, fake_bin, old_command, FAKE_SIGNAL_AFTER_MV="1"
@@ -860,7 +993,8 @@ class InstallerSupplyChainTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertEqual((home / "claude.state").read_text(), str(old_command))
             self.assertTrue(skill.is_symlink())
-            self.assertTrue(command.is_symlink())
+            self.assertTrue(command.is_file())
+            self.assertFalse(command.is_symlink())
             self.assertEqual(
                 list((home / ".claude" / "skills").glob("*.deepseek-mcp.*")), []
             )

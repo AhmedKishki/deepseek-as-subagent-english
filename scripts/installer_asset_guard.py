@@ -10,9 +10,30 @@ from pathlib import Path
 from deepseek_mcp import windows_file_io
 
 MAX_HELPER_BYTES = 1024 * 1024
-PUBLISHED_DIGESTS = {
-    "skill": "5fee1ad4ee0607694d2955772215de641f13366bb17b5c6348ed0e87eaecee65",
-    "command": "de0a8464a5fc1a7ac666606b7ae46fe4334387195034667ca5e45246eabf5562",
+# A published helper copy is installer-owned when its content matches any digest
+# this installer has ever shipped. The set keeps the pre-localization hashes so
+# upgrades from older installs stay recognized, and the English-only hashes so a
+# fresh publication is recognized too. Accepting more than one digest never
+# broadens ownership beyond exact byte-for-byte matches.
+PUBLISHED_DIGESTS: dict[str, frozenset[str]] = {
+    "skill": frozenset(
+        {
+            # pre-localization published copies
+            "5fee1ad4ee0607694d2955772215de641f13366bb17b5c6348ed0e87eaecee65",
+            "cdd5c6ccdc1f7f49464ae881c5fa6a89cb27c2847959f7190f0dfe2b276a3825",
+            # current English-only published copy
+            "11496e8f7cfb0eb98bfe0a4951e1b4f06582ec1f449e3dc9ff499400f7fab221",
+        }
+    ),
+    "command": frozenset(
+        {
+            # pre-localization published copies
+            "de0a8464a5fc1a7ac666606b7ae46fe4334387195034667ca5e45246eabf5562",
+            "9635bee0de64a46ae366d23bc562c37532f6e9d1022f707977cd5a9045828437",
+            # current English-only published copy
+            "582326aeecd3f64e6cde8197480d3f957ad64324179246f9988c35ae326f5614",
+        }
+    ),
 }
 
 
@@ -142,5 +163,5 @@ def verify_published(label: str, destination: Path) -> None:
     if expected is None:
         raise AssetGuardError("helper label is invalid")
     actual = hashlib.sha256(_payload(label, destination)).hexdigest()
-    if actual != expected:
+    if actual not in expected:
         raise AssetGuardError("helper asset digest is not installer-owned")

@@ -200,10 +200,8 @@ if [ ! -f "$CONFIG_FILE" ]; then
     "${PYTHON_CMD[@]}" "$PATH_GUARD" write-exclusive "$CONFIG_FILE" <<'EOF'
 {
   "api_key": "PASTE_YOUR_DEEPSEEK_KEY_HERE",
-  "flash": "deepseek-v4-flash",
-  "flash_reasoning_effort": "high",
-  "pro": "deepseek-v4-pro",
-  "pro_reasoning_effort": "high",
+  "model": "deepseek-v4-flash",
+  "reasoning_effort": "low",
   "_reasoning_effort_options": ["provider-default", "none", "low", "high", "max"],
   "max_turns": 50,
   "max_run_seconds": 18000,

@@ -1,409 +1,73 @@
-# deepseek-as-subagent
+# deepseek-as-subagent-english
 
-**English** · [简体中文](README.zh-CN.md)
+An independently maintained fork **based on [PsChina/deepseek-as-subagent](https://github.com/PsChina/deepseek-as-subagent)**.
 
-[![Python](https://img.shields.io/badge/python-3.10--3.12-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/PsChina/deepseek-as-subagent?style=social)](https://github.com/PsChina/deepseek-as-subagent)
-[![Glama MCP server](https://glama.ai/mcp/servers/PsChina/deepseek-as-subagent/badges/score.svg)](https://glama.ai/mcp/servers/PsChina/deepseek-as-subagent)
-[![MCP](https://img.shields.io/badge/protocol-MCP-purple)](https://modelcontextprotocol.io/)
-[![Mentioned in Awesome MCP Servers](https://awesome.re/mentioned-badge.svg)](https://github.com/punkpeye/awesome-mcp-servers)
-[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](https://github.com/PsChina/deepseek-as-subagent)
+## Added in this fork
 
-> Run DeepSeek — or your own OpenAI-compatible local model — as a **real sub-agent** inside Claude Code / Codex CLI.
-> The host agent keeps the main conversation, planning, judgment, and verification.
-> The selected model gets its own agent loop for execution-heavy work.
-> Coding APIs use workspace-scoped writes and bounded trusted-host Bash; separate read-only APIs provide pure file analysis without command execution.
-
-### Full coding delegation
-
-```text
-       Claude / Codex (main agent)
-         ├─ ordinary coding → delegate_to_deepseek
-         └─ coding task whose direction may change
-                            → start_deepseek → job_id
-                                               ├─ send_deepseek_message(job_id, ...)
-                                               ├─ get_deepseek_status(job_id)
-                                               ├─ cancel_deepseek(job_id)
-                                               └─ get_deepseek_result(job_id)
-         ▼
-       Configured-model coding sub-agent
-         │  Read / Write / Edit / Bash / Glob / Grep / NotebookEdit
-         │  autonomously reads, modifies, runs, and tests in the workspace
-         ▼
-       Result returns to the host
-       Host verifies representative changes / tests
-```
-
-Coding Bash runs on the trusted host with `cwd=workspace`; it is bounded and
-credential-isolated, but it is not an OS sandbox.
-
-### Read-only analysis delegation
-
-```text
-       Claude / Codex (main agent)
-         ├─ ordinary read-only analysis → delegate_to_deepseek_readonly
-         └─ read-only analysis whose direction may change
-                            → start_deepseek_readonly → job_id
-                                                        ├─ send_deepseek_message(job_id, ...)
-                                                        ├─ get_deepseek_status(job_id)
-                                                        ├─ cancel_deepseek(job_id)
-                                                        └─ get_deepseek_result(job_id)
-         ▼
-       Configured-model read-only sub-agent
-         │  Read / Glob / Grep
-         │  autonomously reads, searches, reviews, and performs static analysis
-         ▼
-       Analysis returns to the host
-       Host verifies the conclusion
-```
-
-## Quick start
-
-```bash
-git clone https://github.com/PsChina/deepseek-as-subagent.git
-cd deepseek-as-subagent
-# Inspect install.sh and requirements.lock, then:
-./install.sh
-```
-
-Python 3.10–3.12 must already be installed. The installer never pipes a remote
-bootstrap script into a shell. It installs the exact, hash-verified dependency
-set in `requirements.lock`, registers the MCP server with Claude Code, deploys
-protected generation copies of the skill + `/ds` slash command. It does not
-modify shell startup files. Helper deployment is best-effort after the core MCP
-registration commits; a foreign destination is preserved and reported.
-
-For DeepSeek's hosted API, configure a key in `~/.deepseek-mcp/config.json` on
-POSIX or set `DEEPSEEK_API_KEY` on Windows (get one at
-[platform.deepseek.com](https://platform.deepseek.com)). A local loopback
-OpenAI-compatible server does not need a DeepSeek key. Then run `claude` and
-try `/ds inspect this workspace and summarize its structure`.
-
-To upgrade, fetch and inspect an explicit tag or commit, then re-run the local
-installer. Coding always uses `trusted_host`; read-only APIs need neither Bash
-nor Docker/Podman. For
-Codex or other MCP clients, see [Install](#install) below.
-
-## How is this different from existing DeepSeek MCP servers?
-
-Most `deepseek-mcp-server` projects expose DeepSeek as a **single LLM call** (`create_chat_completion`, `create_anthropic_message`). The host has to read every file itself and feed content into the prompt — DeepSeek only saves the "thinking" cost, not the "reading/writing" cost.
-
-This project gives the configured model **its own agent loop**: tool dispatch,
-file I/O, optional command execution for coding, and multi-turn reasoning
-against the configured workspace. The host hands off a complete logical unit
-and gets a result back. Token savings are end-to-end.
-
-## What's in the box
-
-- **MCP server** (Python, stdio transport)
-- **Coding and read-only delegation**: `delegate_to_deepseek` / `delegate_to_deepseek_readonly`
-- **Steerable background jobs**: `start_deepseek` / `start_deepseek_readonly` plus shared controls
-- **Flash / Pro model routing**: host chooses a stable profile; users control the actual provider model IDs in config
-- **Local coding agent loop** (`agent_loop.py`) with OpenAI-compatible tool calling
-- **Fixed capability APIs**: coding gets Read / Write / Edit / Bash / Glob / Grep / NotebookEdit; read-only gets Read / Glob / Grep
-- **Bash execution**: bounded credential-isolated trusted-host commands through the tool-child boundary
-- **Workspace path boundary** for file tools, with outbound symlinks rejected
-- **Cross-process execution lease** so two MCP servers cannot run DeepSeek concurrently against the same workspace
-- **Crash-safe mutation journal for Write / Edit / NotebookEdit** with recovery query, file verification, and exact acknowledgement before another delegation; trusted-host Bash changes are not journaled
-- **Explicit network retry policy** with OpenAI SDK internal retries disabled to avoid nested retry amplification in proxy/TLS-timeout environments
-- **Claude Code skill + `/ds` command** for delegation policy and forced delegation
-
-## Compatibility
-
-The four delegation entry points accept one additive optional argument,
-`model="flash" | "pro"`. Existing calls that omit it remain valid and now default
-to the Flash profile. Background-job and recovery tools remain additive.
-Mutation-capable legacy hosts must adopt the recovery query/verify/ack handshake
-before starting another delegation; read-only use needs no change.
-Clients should not parse health/error text byte-for-byte because diagnostics are now more specific. Provider calls use an OpenAI-compatible Chat Completions API, including DeepSeek's [compatible endpoint](https://api-docs.deepseek.com/api/create-chat-completion/).
-Local Python module signatures are implementation details rather than a stable
-public API.
+- **English agent surface:** English tool descriptions, instructions, skill, `/ds` command, and installer messages. Subagent instructions require English communication with the orchestrator; source text and task deliverables keep their required language. Raw tool output is not translated.
+- **User-controlled model and reasoning:** the orchestrator cannot select or override either through delegation tools. Users can change their settings for subsequent jobs; running jobs keep their starting configuration.
+- **Default: DeepSeek Flash at low reasoning** (`deepseek-v4-flash`, `low`). Upgrades preserve existing user configuration.
+- **Distinct jobs and sequential instructions:** the skill requires one clear job per subagent, numbered steps, explicit scope, and acceptance criteria. Independent jobs should run in parallel where execution boundaries permit.
 
 ## Install
 
-### Claude Code (default)
+Requires Python 3.10–3.12 and a supported MCP client. Review the installer and `requirements.lock` before running:
 
 ```bash
-git clone https://github.com/PsChina/deepseek-as-subagent
-cd deepseek-as-subagent
-./install.sh
+git clone https://github.com/AhmedKishki/deepseek-as-subagent-english.git
+cd deepseek-as-subagent-english
+./install.sh                         # Claude Code
+# Or:
+bash adapters/codex/install.sh        # Codex CLI
 ```
 
-Then edit `~/.deepseek-mcp/config.json` on POSIX, or set
-`DEEPSEEK_API_KEY` on Windows.
+The executable remains `deepseek-mcp`; the MCP registration remains `deepseek`. For Codex-specific setup, see [the adapter guide](adapters/codex/README.md).
 
-### Codex CLI
+## Configure
 
-```bash
-git clone https://github.com/PsChina/deepseek-as-subagent
-cd deepseek-as-subagent
-bash adapters/codex/install.sh
-```
-
-See [adapters/codex/README.md](adapters/codex/README.md) for the Codex-specific install, delegation policy, and background-job workflow.
-
-The Claude and Codex installers build a fresh isolated runtime, validate its
-configuration and MCP protocol, and only then switch the host registration.
-They keep the active generation plus one previous generation for recovery. Any
-manual runtime must stay outside a delegated workspace when file-mutation tools
-are enabled; unsafe layouts are rejected at startup.
-Both installers serialize install/uninstall transactions. A hard-killed
-installer intentionally leaves an empty fail-closed lock that must be removed
-only after confirming no installer is running.
-
-### Cursor / Cline / Claude Desktop / other MCP clients
-
-The MCP server itself is client-agnostic. Install `requirements.lock` with
-`pip --require-hashes`, install this project with dependency resolution disabled,
-then point your client's MCP config at the generated `deepseek-mcp` entrypoint.
-
-## Usage
-
-Choose capability for the task's **entire expected lifecycle** first. Use
-read-only only when every expected step is static file analysis with Read, Glob,
-and Grep—no command execution. If any step might need Bash, tests, builds,
-lint, Git, program execution, dependency work, workspace mutation, or is not
-clearly read-only, choose coding.
-
-### Simple delegation
-
-Use a synchronous API when the task can run to completion without mid-flight
-intervention. The MCP request remains open until DeepSeek finishes:
-
-- `delegate_to_deepseek(task, context, model="flash")` for coding, Bash, tests,
-  or any task that might write the workspace.
-- `delegate_to_deepseek_readonly(task, context, model="flash")` for static file
-  analysis only.
-
-`model` is optional and accepts only `flash` or `pro`. Omit it for normal work;
-select `pro` explicitly for difficult debugging, architecture-level reasoning,
-or when Flash has already proved insufficient. The host never passes a provider
-model ID directly.
-
-### Steerable background delegation
-
-For longer tasks that may need new instructions or cancellation, choose the
-matching background API, then use the same controls for either job type:
-
-```text
-start_deepseek(task, context, model="flash") / start_deepseek_readonly(task, context, model="flash") -> job_id
-send_deepseek_message(job_id, message)
-get_deepseek_status(job_id)
-cancel_deepseek(job_id)
-get_deepseek_result(job_id)
-```
-
-Either `start_*` API returns quickly while the DeepSeek agent continues in a
-background worker. Steering changes only the task instruction: it cannot change
-the job's fixed tools, Bash availability, or selected model profile. Cancellation
-wakes retry backoff and promptly terminates an in-flight provider or local-tool
-subprocess.
-
-If a readonly job later needs a command or workspace mutation, cancel or finish
-it, then create a new coding job with `start_deepseek`; steering cannot upgrade
-the existing readonly job.
-
-If a steering message arrives after DeepSeek has planned tool calls but before a not-yet-executed tool runs, the stale tool call is skipped and DeepSeek re-plans from the new parent instruction.
-
-Only **one DeepSeek execution per canonical workspace** may run at a time, including executions started by separate MCP server processes. This lease coordinates DeepSeek MCP executions only; it cannot prevent the host agent, IDE, user, or another local process from changing the workspace. While a coding background job is running, the host should steer, query, or cancel that job rather than independently mutate the same workspace, then resume host-side edits after the job reaches a terminal state. Background job IDs and results are session-scoped; collect the result before closing the host session.
-
-### Mutation recovery
-
-Mutations committed through `Write`, `Edit`, and `NotebookEdit` are journaled
-before commit. Trusted-host Bash runs outside this transaction journal and may
-modify workspace files directly; those changes are not represented by
-`get_deepseek_recovery`. After an interrupted coding run in which Bash may have
-executed, inspect the workspace independently before continuing or retrying work.
-After a result reports journaled mutations—or after cancellation, disconnection,
-or MCP restart—run:
-
-```text
-get_deepseek_recovery()
-# verify every reported file
-acknowledge_deepseek_mutations(transaction_ids)
-```
-
-New delegation fails closed until the exact reviewed IDs are acknowledged.
-Recovery works without a valid DeepSeek API credential and never deletes or
-rolls back workspace files.
-
-### Claude Code helpers
-
-- `delegate_to_deepseek` / `delegate_to_deepseek_readonly` — Claude selects the
-  matching fixed capability and Flash/Pro profile
-- `/ds <task>` — force synchronous coding delegation
-- `DEEPSEEK_MODE=off claude` — start one session with DeepSeek disabled
-
-## When delegation actually saves money
-
-The delegation decision should happen **before the host reads large amounts of source**. If the host reads first and then delegates, both agents pay the repository-reading cost.
-
-Sweet spot:
-- ✅ Multi-file implementation / mechanical refactors / test generation
-- ✅ Large data + simple processing (log scan, file conversion, ETL)
-- ✅ Tasks that may benefit from a cheap independent execution loop
-- ❌ Tiny edits where orchestration overhead dominates
-- ❌ Cross-domain architecture / ambiguous root-cause analysis / security-sensitive judgment
-
-## Architecture
-
-```text
-┌─────────────────────────────────────────────────────────────────┐
-│  Claude Code / Codex CLI (main agent)                           │
-│    ↓ stdio (MCP protocol, local)                                │
-│  deepseek-as-subagent (Python MCP process)                      │
-│    ├─ synchronous delegate                                      │
-│    └─ steerable background job manager                          │
-│         ↓                                                       │
-│       coding agent loop + selected fixed-capability tools       │
-│    ↓ configured OpenAI-compatible API                          │
-│  DeepSeek API or a local endpoint                               │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-No third-party proxy or cloud relay is introduced by this project. Delegated
-prompts and tool/file outputs selected by the agent are sent to the configured
-OpenAI-compatible API, so only delegate data that endpoint is permitted to
-receive.
-
-## Configuration
-
-`~/.deepseek-mcp/config.json`:
+Edit `~/.deepseek-mcp/config.json` on POSIX:
 
 ```json
 {
-  "api_key": "sk-...",
-  "flash": "deepseek-v4-flash",
-  "flash_reasoning_effort": "high",
-  "pro": "deepseek-v4-pro",
-  "pro_reasoning_effort": "high",
-  "_reasoning_effort_options": ["provider-default", "none", "low", "high", "max"],
-  "max_turns": 50,
-  "max_run_seconds": 18000,
-  "allowed_tools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit"]
+  "api_key": "YOUR_DEEPSEEK_API_KEY",
+  "model": "deepseek-v4-flash",
+  "reasoning_effort": "low"
 }
 ```
 
-`flash` and `pro` are the provider model IDs behind the two stable MCP routing
-profiles. You can change these strings when DeepSeek publishes a new model
-revision, or when a compatible endpoint uses different model names, without
-changing how Claude/Codex calls the MCP tools. The public tool argument remains
-only `model="flash"` or `model="pro"`.
+Reasoning values: `provider-default`, `none`, `low`, `high`, `max`. `DEEPSEEK_MODEL` and `DEEPSEEK_REASONING_EFFORT` provide fallbacks when their configuration fields are absent. See [model configuration](docs/model-selection.md) for precedence, provider support, and migration from upstream's Flash/Pro settings.
 
-`flash_reasoning_effort` and `pro_reasoning_effort` accept `provider-default`,
-`none`, `low`, `high`, or `max`. `provider-default` (also the default when the
-field is absent) sends no reasoning controls. `none` disables DeepSeek thinking;
-the other values explicitly enable it at that effort. `_reasoning_effort_options`
-is only an in-file hint and is ignored at runtime. New installer-generated
-configs explicitly set both slots to `high`; for a generic local server, change
-those fields to `provider-default` or remove them.
+DeepSeek credentials can use `DEEPSEEK_API_KEY`. Windows credentials are environment-only. For an OpenAI-compatible provider, configure `base_url` and `model`; use `provider-default` if explicit reasoning controls are unsupported. Authenticated loopback providers use `OPENAI_API_KEY` only. Remote custom providers also accept an explicit POSIX `api_key`. Remote endpoints require HTTPS.
 
-## Local / OpenAI-compatible models
+## Use
 
-Set `base_url` and the model IDs in the existing config. The public `flash` and
-`pro` choices remain host-facing profiles and may both point to the same model:
+In Claude Code, `/ds <task>` forces coding delegation. Other MCP clients can call these tools directly with `task` and optional `context`:
 
-```json
-{
-  "base_url": "http://127.0.0.1:8080/v1",
-  "flash": "your-local-model",
-  "pro": "your-local-model",
-  "flash_reasoning_effort": "provider-default",
-  "pro_reasoning_effort": "provider-default",
-  "max_output_tokens": 1024
-}
-```
+| Capability                          | Wait for completion               | Background job              |
+| ----------------------------------- | --------------------------------- | --------------------------- |
+| Coding, commands, tests, or changes | `delegate_to_deepseek`          | `start_deepseek`          |
+| Static file analysis only           | `delegate_to_deepseek_readonly` | `start_deepseek_readonly` |
 
-This supports servers that implement the OpenAI-compatible
-`/v1/chat/completions` interface, such as llama.cpp server, LM Studio, vLLM,
-SGLang, Ollama's compatible endpoint, and other compatible servers. These are
-interface-level examples; this project does not claim to have tested every
-server version or model. HTTP remains limited to `localhost`, `127.0.0.1`, and
-`[::1]`; remote endpoints must use HTTPS.
+Background controls: `send_deepseek_message`, `get_deepseek_status`, `cancel_deepseek`, and `get_deepseek_result`. The orchestrator must verify results. `ping` checks configuration without making a model request.
 
-When updating an installer-generated config, replace both reasoning effort fields
-as shown above. Generic endpoints receive no DeepSeek-specific `thinking` extension;
-explicit efforts send only `reasoning_effort`, which the server must support.
-`max_output_tokens` bounds each response (1–16384; default 16384). Lower it for
-small local context windows, leaving room for the prompt and accumulated tool history.
+**Parallelism:** one execution is allowed per canonical workspace. Independent jobs need separate workspaces/worktrees and server instances to run concurrently; otherwise run distinct jobs sequentially. Do not bypass the workspace lease.
 
-Unauthenticated loopback servers need no key. The local fallback credential is
-only a dummy value, and `DEEPSEEK_API_KEY` is not sent to a loopback server. If
-your local server requires a key, set `OPENAI_API_KEY` before starting Claude
-Code or Codex. For remote compatible endpoints, `OPENAI_API_KEY` is supported;
-DeepSeek's hosted endpoint continues to use `DEEPSEEK_API_KEY`. Windows secrets
-remain environment-only.
-Custom remote endpoints do not inherit `DEEPSEEK_API_KEY`; configure their own
-`OPENAI_API_KEY` or an explicit `api_key` on POSIX.
+## External MCP tools
 
-The server must support `/v1/chat/completions` with OpenAI-compatible tool
-calling, enough context for the delegated task and tool history, and reasonably
-well-formed structured tool calls. The agent loop continues after a tool call,
-executes the selected Read / Write / Edit / Bash / Glob / Grep / NotebookEdit
-tool, and sends the result back to the model. If an endpoint omits usage data,
-the run stays bounded by byte-based resource accounting; returned token counts
-can be zero because the provider did not report them.
+The subagent **does not currently connect to external MCP servers** or inherit the orchestrator's MCP tools. That requires a separate MCP-client integration. Coding tools are Read, Write, Edit, Bash, Glob, Grep, and NotebookEdit; read-only tools are Read, Glob, and Grep.
 
-To validate a real local model against a disposable workspace, run:
+Deferred concurrency, loop-detection, and external MCP work is tracked in [TODO.md](TODO.md). The current single-subagent model remains unchanged.
 
-```bash
-python scripts/smoke_local_model.py --base-url http://127.0.0.1:1234/v1 --model your-local-model
-```
+## Safety and recovery
 
-Use the project's installed Python environment. The check verifies real Read,
-Edit, and Bash calls, exact file contents, the command's success marker, mutation
-recovery acknowledgement, and a subsequent read-only delegation.
-It does not download models or change your persistent configuration.
+Runs are bounded: `max_turns` defaults to 50 (maximum 100), tool calls are limited to 128 per run, and `max_run_seconds` defaults to 18,000 seconds (five hours; maximum 48 hours). Provider retries, individual commands, tokens, conversation size, and mutation output are also bounded. Reduce the configured turn/time limits for shorter jobs. There is not yet a dedicated no-progress detector; repeated mistakes stop at these limits, not necessarily earlier.
 
-To also verify the host-facing MCP stdio boundary and parent-to-agent messages:
+Coding Bash runs on the trusted host, **not in an OS sandbox**. Tasks and selected file/tool contents go to the configured provider. See [SECURITY.md](SECURITY.md).
 
-```bash
-python scripts/smoke_local_mcp.py --base-url http://127.0.0.1:1234/v1 --model your-local-model
-```
+After journaled mutations or an interrupted run, call `get_deepseek_recovery`, verify the reported files, then acknowledge their exact transaction IDs with `acknowledge_deepseek_mutations`. Bash changes are not journaled and require independent workspace inspection.
 
-This starts the current source server with a disposable HOME and workspace,
-checks synchronous coding and read-only delegation, verifies and acknowledges
-mutation records, and sends a random steering token to a Pro-profile background
-job. The check requires that token in the model's final response.
-
-For upgrade compatibility, a legacy single `model` field is still accepted when
-`flash` and `pro` are absent; its value is used for both slots. Do not combine
-legacy `model` with the new `flash` / `pro` fields.
-
-`allowed_tools` is retained for configuration compatibility and validation. It
-does not select capabilities for a delegation: each MCP API applies its own
-fixed profile after configuration is loaded.
-
-`max_run_seconds` is the wall-clock limit for one delegated run. Its default is
-18,000 seconds (5 hours), it may be increased explicitly, and its absolute
-accepted maximum is 172,800 seconds (48 hours). Individual provider requests
-remain bounded to 180 seconds within that run budget.
-For synchronous delegation, the MCP client's tool timeout must be at least the
-configured run limit plus cleanup grace; Codex installs with an 18,060-second
-default (five hours plus 60 seconds).
-
-**Workspace root** auto-follows the directory where you launch the host client.
-To lock it to a fixed path regardless of cwd, add `"workspace": "/abs/path"`
-to the config. It is the file-tool path boundary and the working directory for
-coding Bash; it is not an OS sandbox for trusted-host Bash.
-
-`delegate_to_deepseek` and `start_deepseek` always use full coding tools and
-bounded `trusted_host` Bash. `delegate_to_deepseek_readonly` and
-`start_deepseek_readonly` always use only Read/Glob/Grep and never expose Bash.
-The selected API—not a task argument or model request—freezes that capability
-for the job lifetime.
-See [SECURITY.md](SECURITY.md) for boundaries and platform limitations.
-
-Override at runtime with env vars: `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_WORKSPACE`, `DEEPSEEK_MODE=off`.
-
-## Uninstall
-
-Claude Code: `./uninstall.sh`. Codex: `bash adapters/codex/uninstall.sh`.
-
-Each uninstaller removes only its owned host registration. Neither deletes your
-projects, DeepSeek config/API key, logs, or account.
+Disable delegation for a launch with `DEEPSEEK_MODE=off claude` or `DEEPSEEK_MODE=off codex`. Uninstall with `./uninstall.sh` or `bash adapters/codex/uninstall.sh`; user configuration and projects are preserved.
 
 ## License
 
-MIT
+[MIT](LICENSE). Original project: [PsChina/deepseek-as-subagent](https://github.com/PsChina/deepseek-as-subagent).

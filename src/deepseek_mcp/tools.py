@@ -24,8 +24,8 @@ from .tool_schemas import build_tool_schemas
 from .transaction_report import mutation_warning
 from .walk_support import WorkspaceEntryTooLarge
 from .workspace_walk import WalkEntry, WorkspaceWalk
-MAX_TOOL_OUTPUT = 50_000  # 单次工具结果最大字符数
-MAX_WRITE_BYTES = 5_000_000  # 单次 Write 最大字节数（5MB，防 DeepSeek 写爆磁盘）
+MAX_TOOL_OUTPUT = 50_000  # Maximum characters returned from one tool call.
+MAX_WRITE_BYTES = 5_000_000  # Maximum bytes per Write (5 MB; prevents run-away disk use).
 MAX_GLOB_RESULTS = 500
 MAX_GREP_FILES = 10_000
 MAX_GREP_LINE_CHARS = 2_000
@@ -59,7 +59,7 @@ def _slice_lines(text: str, args: dict) -> str:
     return "\n".join(lines[offset:end])
 
 def _execute_read(args: dict, workspace: Path) -> str:
-    """读文件。args: {path: str, offset?: int, limit?: int}"""
+    """Read a file. args: {path: str, offset?: int, limit?: int}"""
     path = args.get("path", "")
     if not isinstance(path, str) or not path:
         return "ERROR: missing required 'path' argument"
@@ -77,7 +77,7 @@ def _execute_read(args: dict, workspace: Path) -> str:
 def _execute_write(
     args: dict, workspace: Path, mutation_budget: MutationBudget | None = None
 ) -> str:
-    """写文件（覆盖）。args: {path: str, content: str}"""
+    """Write a file (overwrite). args: {path: str, content: str}"""
     path = args.get("path", "")
     content = args.get("content", "")
     if not isinstance(path, str) or not path:
@@ -153,7 +153,7 @@ def _build_replacement(
 def _execute_edit(
     args: dict, workspace: Path, mutation_budget: MutationBudget | None = None
 ) -> str:
-    """精确字符串替换。args: {path: str, old_string: str, new_string: str, replace_all?: bool}"""
+    """Exact string replacement. args: {path, old_string, new_string, replace_all?: bool}"""
     try:
         path, old, new, replace_all = _parse_edit_request(args)
         text, identity = _read_edit_target(path, workspace)
@@ -212,7 +212,7 @@ def _format_glob_result(
 
 
 def _execute_glob(args: dict, workspace: Path) -> str:
-    """文件名 pattern 匹配。args: {pattern: str, path?: str}"""
+    """Match file names by pattern. args: {pattern: str, path?: str}"""
     try:
         with _parse_glob_request(args, workspace) as walk:
             matches, result_limit = _scan_glob_matches(walk)
@@ -448,7 +448,7 @@ def _format_grep_result(results: list[str], pattern: str, truncated: bool) -> st
         header += " (results incomplete)"
     return _truncate(header + ":\n" + "\n".join(results))
 def _execute_grep(args: dict, workspace: Path) -> str:
-    """正则搜索文件内容。args: {pattern: str, path?: str, glob?: str, max_matches?: int}"""
+    """Regex search of file contents. args: {pattern, path?, glob?, max_matches?}"""
     try:
         walk, regex, limit = _parse_grep_request(args, workspace)
         with walk:
@@ -478,7 +478,7 @@ def execute_tool(
     mutation_budget: MutationBudget | None = None,
     max_bash_timeout: int | None = None,
 ) -> str:
-    """调度入口：根据工具名调对应实现。"""
+    """Dispatch entrypoint: call the implementation for a tool name."""
     if not isinstance(name, str):
         return "ERROR: tool name must be a string"
     if not isinstance(args, dict):

@@ -20,15 +20,18 @@ from .provider_settings import (
 )
 CONFIG_PATH = Path.home() / ".deepseek-mcp" / "config.json"
 MAX_CONFIG_BYTES = 1024 * 1024
-DEFAULT_FLASH_MODEL = "deepseek-v4-flash"
-DEFAULT_PRO_MODEL = "deepseek-v4-pro"
-DEFAULT_REASONING_EFFORT = "high"
+DEFAULT_MODEL = "deepseek-v4-flash"
+# Official DeepSeek default depth. Generic endpoints default to "provider-default"
+# so legacy configs never start sending an effort value the endpoint may reject.
+DEFAULT_REASONING_EFFORT = "low"
 PROVIDER_DEFAULT_REASONING_EFFORT = "provider-default"
 REASONING_EFFORT_OPTIONS = (
     PROVIDER_DEFAULT_REASONING_EFFORT, "none", "low", "high", "max"
 )
-# Kept as the active-model default for internal/backward-compatible Config construction.
-DEFAULT_MODEL = DEFAULT_FLASH_MODEL
+# Model and reasoning depth are user-configuration owned, never orchestrator
+# chosen. Environment variables are a fallback for deployments without a file.
+MODEL_ENV_VAR = "DEEPSEEK_MODEL"
+REASONING_EFFORT_ENV_VAR = "DEEPSEEK_REASONING_EFFORT"
 DEFAULT_MAX_TURNS = 50
 MAX_TURNS = 100
 DEFAULT_MAX_RUN_SECONDS = 5 * 60 * 60
@@ -50,7 +53,10 @@ CONFIG_KEYS = frozenset(
     {
         "api_key",
         "workspace",
-        "model",  # legacy single-model config; accepted for upgrade compatibility
+        "model",  # user-owned active provider model ID
+        "reasoning_effort",  # user-owned active reasoning depth
+        # Legacy Flash/Pro profile keys; accepted but deprecated. The active
+        # model/effort fall back to the Flash slot when the new keys are absent.
         "flash",
         "pro",
         "flash_reasoning_effort",
@@ -312,20 +318,6 @@ def _validate_model(value: object, field_name: str = "model") -> str:
     return value
 
 
-def _load_model_slots(data: dict) -> tuple[str, str]:
-    """Load user-configurable provider model IDs for the public Flash/Pro slots."""
-    if "model" in data:
-        if "flash" in data or "pro" in data:
-            raise RuntimeError("legacy model cannot be combined with flash/pro")
-        legacy = _validate_model(data["model"], "model")
-        # Preserve old single-model configs exactly across the routing upgrade.
-        return legacy, legacy
-    return (
-        _validate_model(data.get("flash", DEFAULT_FLASH_MODEL), "flash"),
-        _validate_model(data.get("pro", DEFAULT_PRO_MODEL), "pro"),
-    )
-
-
 def _validate_reasoning_effort(value: object, field_name: str) -> str:
     if not isinstance(value, str) or value not in REASONING_EFFORT_OPTIONS:
         allowed = ", ".join(REASONING_EFFORT_OPTIONS)
@@ -333,21 +325,59 @@ def _validate_reasoning_effort(value: object, field_name: str) -> str:
     return value
 
 
-def _validate_runtime_reasoning_effort(value: object, field_name: str) -> str:
-    return _validate_reasoning_effort(value, field_name)
+def _validate_legacy_profiles(data: dict) -> None:
+    """Validate deprecated Flash/Pro keys so typos still fail closed."""
+    for field_name in ("flash", "pro"):
+        if field_name in data:
+            _validate_model(data[field_name], field_name)
+    for field_name in ("flash_reasoning_effort", "pro_reasoning_effort"):
+        if field_name in data:
+            _validate_reasoning_effort(data[field_name], field_name)
 
 
-def _load_reasoning_effort(data: dict, field_name: str) -> str:
-    if field_name not in data:
-        return PROVIDER_DEFAULT_REASONING_EFFORT
-    return _validate_runtime_reasoning_effort(data[field_name], field_name)
+def _load_active_model(data: dict) -> str:
+    """Resolve the single user-owned provider model ID for all delegation.
+
+    Precedence: explicit ``model``, then the deprecated ``flash`` slot, then the
+    ``DEEPSEEK_MODEL`` environment fallback, then the built-in default. The
+    orchestrator never supplies a model, so this is the only selection path.
+    """
+    if "model" in data:
+        return _validate_model(data["model"], "model")
+    if "flash" in data:
+        return _validate_model(data["flash"], "flash")
+    environment = os.getenv(MODEL_ENV_VAR)
+    if environment is not None:
+        return _validate_model(environment, MODEL_ENV_VAR)
+    return DEFAULT_MODEL
 
 
-def _load_reasoning_efforts(data: dict) -> tuple[str, str]:
-    return (
-        _load_reasoning_effort(data, "flash_reasoning_effort"),
-        _load_reasoning_effort(data, "pro_reasoning_effort"),
-    )
+def _load_active_reasoning_effort(data: dict) -> str:
+    """Resolve the single user-owned reasoning depth.
+
+    Precedence: explicit ``reasoning_effort``, then the deprecated
+    ``flash_reasoning_effort`` slot, then ``DEEPSEEK_REASONING_EFFORT``, then the
+    endpoint default. The endpoint default is ``low`` for the official DeepSeek
+    endpoint and ``provider-default`` (send nothing) for any other endpoint, so a
+    legacy config never starts sending an effort a gateway may reject. Values are
+    validated before any provider request.
+    """
+    if "reasoning_effort" in data:
+        return _validate_reasoning_effort(
+            data["reasoning_effort"], "reasoning_effort"
+        )
+    if "flash_reasoning_effort" in data:
+        return _validate_reasoning_effort(
+            data["flash_reasoning_effort"], "flash_reasoning_effort"
+        )
+    environment = os.getenv(REASONING_EFFORT_ENV_VAR)
+    if environment is not None:
+        return _validate_reasoning_effort(environment, REASONING_EFFORT_ENV_VAR)
+    # Missing everywhere: apply the official DeepSeek depth only to the official
+    # endpoint; a generic OpenAI-compatible endpoint keeps the legacy no-effort shape.
+    if _is_deepseek_endpoint(data.get("base_url", "https://api.deepseek.com")):
+        return DEFAULT_REASONING_EFFORT
+    return PROVIDER_DEFAULT_REASONING_EFFORT
 
 
 def _parse_base_url(value: object):
@@ -389,7 +419,7 @@ def _validate_base_url(value: object) -> str:
 class Config:
     api_key: str
     workspace: Path
-    # Active provider model for this execution. Public hosts never set this directly.
+    # User-owned provider model for this execution. Public hosts never set it.
     model: str = DEFAULT_MODEL
     max_turns: int = DEFAULT_MAX_TURNS
     allowed_tools: list[str] = field(default_factory=lambda: list(DEFAULT_ALLOWED_TOOLS))
@@ -397,13 +427,8 @@ class Config:
     max_run_seconds: int = DEFAULT_MAX_RUN_SECONDS
     delegation_capability: str = field(default="coding", repr=False)
     expected_workspace_identity: str | None = field(default=None, repr=False)
-    # User-configurable provider model IDs behind the stable public Flash/Pro slots.
-    flash_model: str = DEFAULT_FLASH_MODEL
-    pro_model: str = DEFAULT_PRO_MODEL
-    # Active effort plus the user-configured effort attached to each public slot.
-    reasoning_effort: str = PROVIDER_DEFAULT_REASONING_EFFORT
-    flash_reasoning_effort: str = PROVIDER_DEFAULT_REASONING_EFFORT
-    pro_reasoning_effort: str = PROVIDER_DEFAULT_REASONING_EFFORT
+    # User-owned reasoning depth for this execution. Public hosts never set it.
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
 
     def __post_init__(self) -> None:
@@ -413,16 +438,8 @@ class Config:
             self.workspace, self.expected_workspace_identity
         )
         self.model = _validate_model(self.model)
-        self.flash_model = _validate_model(self.flash_model, "flash")
-        self.pro_model = _validate_model(self.pro_model, "pro")
-        self.reasoning_effort = _validate_runtime_reasoning_effort(
+        self.reasoning_effort = _validate_reasoning_effort(
             self.reasoning_effort, "reasoning_effort"
-        )
-        self.flash_reasoning_effort = _validate_runtime_reasoning_effort(
-            self.flash_reasoning_effort, "flash_reasoning_effort"
-        )
-        self.pro_reasoning_effort = _validate_runtime_reasoning_effort(
-            self.pro_reasoning_effort, "pro_reasoning_effort"
         )
         self.base_url = _validate_base_url(self.base_url)
         self.max_turns = _validate_max_turns(self.max_turns)
@@ -447,12 +464,12 @@ class Config:
 
     @classmethod
     def _from_data(cls, data: dict, credential: str) -> "Config":
-        flash_model, pro_model = _load_model_slots(data)
-        flash_effort, pro_effort = _load_reasoning_efforts(data)
+        _validate_legacy_profiles(data)
         return cls(
             credential,
             workspace=_load_workspace(data),
-            model=flash_model,
+            model=_load_active_model(data),
+            reasoning_effort=_load_active_reasoning_effort(data),
             max_turns=_load_max_turns(data),
             max_output_tokens=_validate_max_output_tokens(
                 data.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)
@@ -462,11 +479,6 @@ class Config:
             ),
             allowed_tools=_load_allowed_tools(data),
             base_url=data.get("base_url", "https://api.deepseek.com"),
-            flash_model=flash_model,
-            pro_model=pro_model,
-            reasoning_effort=flash_effort,
-            flash_reasoning_effort=flash_effort,
-            pro_reasoning_effort=pro_effort,
         )
 
     @classmethod

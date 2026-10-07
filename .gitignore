@@ -23,7 +23,7 @@ env/
 .DS_Store
 
 # Project
-~/.deepseek-mcp/      # 配置文件不入 git
+~/.deepseek-mcp/      # config directory is not committed
 .deepseek-mcp/
 *.log
 .coverage

@@ -1,30 +1,39 @@
-# DeepSeek model selection
+# DeepSeek model and reasoning selection
 
-The public delegation API supports exactly two stable model profiles:
+Model choice and reasoning depth are owned by user configuration, not by the calling orchestrator. The public delegation API takes no `model` argument and no reasoning argument. Every delegation uses the same configured model and depth.
 
-- `flash`
-- `pro`
-
-All four delegation entry points default to `model="flash"` when the argument is omitted. Use `model="pro"` only when the host decides the task needs the stronger model, for example complex debugging, architecture work, or a retry after Flash is insufficient.
-
-The actual provider model IDs and reasoning effort for each slot are user-configurable in `~/.deepseek-mcp/config.json`:
+The active provider model and reasoning depth live in `~/.deepseek-mcp/config.json` and can be changed at any time:
 
 ```json
 {
-  "flash": "deepseek-v4-flash",
-  "flash_reasoning_effort": "high",
-  "pro": "deepseek-v4-pro",
-  "pro_reasoning_effort": "high",
-  "_reasoning_effort_options": ["provider-default", "none", "low", "high", "max"]
+  "model": "deepseek-v4-flash",
+  "reasoning_effort": "low"
 }
 ```
 
-`_reasoning_effort_options` is a documentation hint only and is ignored at runtime. The effective fields are `flash_reasoning_effort` and `pro_reasoning_effort`. Supported values are `provider-default`, `none`, `low`, `high`, and `max`; `provider-default` sends no reasoning controls, `none` disables thinking, and the other values enable thinking at the selected effort.
+- `model` is any provider model ID the endpoint accepts. Change it when DeepSeek publishes a new revision, or when a compatible endpoint exposes a different name, without touching the MCP tool API.
+- `reasoning_effort` is one of `provider-default`, `none`, `low`, `high`, or `max`. `provider-default` sends no reasoning controls; `none` disables DeepSeek thinking; the other values enable thinking at that effort.
 
-Reasoning controls are sent only when the corresponding `*_reasoning_effort` field is explicitly present. If an effort field is absent, deepseek-mcp leaves thinking controls unspecified for that slot so the provider's existing default applies. This preserves the request shape of older configs and OpenAI-compatible gateways. New installer-generated configs explicitly set both slots to `high`.
+Both values are validated when the configuration loads. An invalid model ID or an unknown effort value fails closed before any provider request.
 
-The strings behind `flash` and `pro` are intentionally not hard-coded in the routing layer. Users can update them when DeepSeek releases new model revisions, or when a compatible API endpoint exposes different model names, without changing the MCP tool API. The host still passes only `model="flash"` or `model="pro"`; it never sends provider model IDs or reasoning effort values directly.
+## Environment fallback
 
-A background job keeps the profile, resolved provider model, and configured reasoning behavior selected when it starts. Steering messages do not change them for an already-running job.
+If a config key is absent, deepseek-mcp falls back to the matching environment variable and then to its built-in default:
 
-For upgrade compatibility, the legacy single `model` config field is still accepted when `flash` and `pro` are absent. In that case its value is used for both slots. Do not combine legacy `model` with the new `flash` / `pro` fields.
+- `model`: config `model` → `DEEPSEEK_MODEL` → `deepseek-v4-flash`
+- `reasoning_effort`: config `reasoning_effort` → `DEEPSEEK_REASONING_EFFORT` → endpoint default. The endpoint default is `low` for the official DeepSeek endpoint and `provider-default` for any other OpenAI-compatible endpoint, so an old config that never set a depth does not start sending an effort value a gateway might reject. The default model is DeepSeek Flash at low reasoning.
+
+Environment values are validated exactly like config values.
+
+## Background jobs
+
+A background job keeps the configured model, reasoning depth, and capability frozen when it starts. Steering messages do not change them for a running job. To change the model or depth, edit the config and start a new job.
+
+## Deprecated Flash/Pro keys
+
+Earlier releases exposed `flash` and `pro` routing slots and let the orchestrator pick one per delegation. That host-side selection is removed. For upgrade compatibility the old keys are still accepted but deprecated:
+
+- Active model: `model` → `flash` → `DEEPSEEK_MODEL` → default.
+- Active depth: `reasoning_effort` → `flash_reasoning_effort` → `DEEPSEEK_REASONING_EFFORT` → default.
+
+`pro` and `pro_reasoning_effort` are validated but ignored. Migrate to `model` and `reasoning_effort` and remove the old keys.

@@ -33,9 +33,7 @@ async def verify(args: argparse.Namespace) -> None:
         target = workspace / "input.txt"
         target.write_text("original-value\n", encoding="utf-8")
         config = {"workspace": str(workspace), "base_url": args.base_url,
-                  "flash": args.model, "pro": args.model,
-                  "flash_reasoning_effort": "provider-default",
-                  "pro_reasoning_effort": "provider-default",
+                  "model": args.model, "reasoning_effort": "provider-default",
                   "max_output_tokens": args.max_output_tokens,
                   "max_turns": 12, "max_run_seconds": 240,
                   "allowed_tools": ["Read", "Edit", "Bash"]}
@@ -74,7 +72,7 @@ async def verify(args: argparse.Namespace) -> None:
                 evidence["ping"] = await call("ping")
                 assert "NOT_CONFIGURED" not in evidence["ping"]
                 coding = await call("delegate_to_deepseek", {
-                    "model": "flash", "task":
+                    "task":
                     "Use Read to inspect input.txt. Use Edit to replace original-value "
                     "with verified-local-value, preserving the newline. Then use Bash "
                     "to run exactly: test \"$(cat input.txt)\" = verified-local-value "
@@ -100,7 +98,7 @@ async def verify(args: argparse.Namespace) -> None:
                 assert not ack["pending"]
                 assert (await call("get_deepseek_recovery", structured=True))["count"] == 0
                 readonly = await call("delegate_to_deepseek_readonly", {
-                    "model": "flash", "task":
+                    "task":
                     "Use Read to inspect input.txt and return its exact contents. Do not edit files."})
                 assert "verified-local-value" in readonly
                 readonly_log = (private / "server.log").read_text(encoding="utf-8")[len(coding_log):]
@@ -108,7 +106,7 @@ async def verify(args: argparse.Namespace) -> None:
                 assert "Read" in readonly_tools and set(readonly_tools).issubset(
                     {"Read", "Glob", "Grep"}), readonly_tools
                 evidence.update(readonly_result=readonly, readonly_tools=readonly_tools)
-                started = await call("start_deepseek_readonly", {"model": "pro", "task":
+                started = await call("start_deepseek_readonly", {"task":
                     "Use Read to inspect input.txt. Return its exact contents and follow any "
                     "additional parent instructions received while working."}, structured=True)
                 job_id = started["job_id"]

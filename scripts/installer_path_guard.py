@@ -23,14 +23,11 @@ MAX_GENERATIONS = 10_000
 MAX_CONFIG_BYTES = 1024 * 1024
 GENERATION_NAME = re.compile(r"generation\.[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 
-
 class GuardError(RuntimeError):
     pass
 
-
 def _is_windows() -> bool:
     return os.name == "nt"
-
 
 def _validate_windows_path(path: Path, *, directory: bool) -> None:
     if not _is_windows():
@@ -40,7 +37,6 @@ def _validate_windows_path(path: Path, *, directory: bool) -> None:
     except (OSError, windows_file_io.WindowsPathError) as exc:
         raise GuardError("Windows path failed handle and ACL validation") from exc
 
-
 def _validate_windows_descriptor(descriptor: int, path: Path) -> None:
     if not _is_windows():
         return
@@ -49,12 +45,10 @@ def _validate_windows_descriptor(descriptor: int, path: Path) -> None:
     except (OSError, windows_file_io.WindowsPathError) as exc:
         raise GuardError("Windows file handle failed ACL validation") from exc
 
-
 def _is_link_or_reparse(path: Path, info: os.stat_result) -> bool:
     junction = getattr(os.path, "isjunction", lambda _path: False)
     attributes = int(getattr(info, "st_file_attributes", 0) or 0)
     return path.is_symlink() or junction(path) or bool(attributes & 0x400)
-
 
 def _check_owner(info: os.stat_result, *, trusted_root: bool = False) -> None:
     if os.name != "posix":
@@ -64,7 +58,6 @@ def _check_owner(info: os.stat_result, *, trusted_root: bool = False) -> None:
         allowed.add(0)
     if info.st_uid not in allowed:
         raise GuardError("path ownership is not trusted")
-
 
 def secure_directory(path: Path, *, create: bool = True) -> None:
     if create:
@@ -88,7 +81,6 @@ def secure_directory(path: Path, *, create: bool = True) -> None:
                 raise GuardError("directory mode could not be secured")
         finally:
             os.close(descriptor)
-
 
 def secure_file(path: Path, *, harden_mode: bool = True) -> None:
     try:
@@ -115,7 +107,6 @@ def secure_file(path: Path, *, harden_mode: bool = True) -> None:
         finally:
             os.close(descriptor)
 
-
 def _write_all(descriptor: int, payload: bytes) -> None:
     view = memoryview(payload)
     while view:
@@ -123,7 +114,6 @@ def _write_all(descriptor: int, payload: bytes) -> None:
         if written <= 0:
             raise GuardError("configuration write made no progress")
         view = view[written:]
-
 
 def _fsync_directory(path: Path) -> None:
     if os.name != "posix":
@@ -136,7 +126,6 @@ def _fsync_directory(path: Path) -> None:
     finally:
         os.close(descriptor)
 
-
 def _unlink_if_identity(path: Path, expected: os.stat_result) -> None:
     try:
         current = path.lstat()
@@ -144,7 +133,6 @@ def _unlink_if_identity(path: Path, expected: os.stat_result) -> None:
         return
     if _same_identity(current, expected):
         path.unlink()
-
 
 def _publish_no_clobber(temp_path: Path, path: Path, expected: os.stat_result) -> None:
     try:
@@ -208,17 +196,21 @@ def _relative_parts(value: Path) -> tuple[str, ...]:
         raise GuardError("private directory path contains an unsafe component")
     return parts
 
-def _secure_posix_descendant(root: Path, parts: tuple[str, ...]) -> None:
+def _posix_descendant(root: Path, parts: tuple[str, ...], *, create: bool) -> None:
     flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(root, flags)
     try:
         for part in parts:
+            if create:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
             try:
-                os.mkdir(part, 0o700, dir_fd=descriptor)
-            except FileExistsError:
-                pass
-            child = os.open(part, flags, dir_fd=descriptor)
+                child = os.open(part, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                return
             info = os.fstat(child)
             try:
                 if not stat.S_ISDIR(info.st_mode):
@@ -226,7 +218,8 @@ def _secure_posix_descendant(root: Path, parts: tuple[str, ...]) -> None:
                 _check_owner(info)
                 if stat.S_IMODE(info.st_mode) & 0o022:
                     raise GuardError("private path component is writable by another user")
-                os.fchmod(child, 0o700)
+                if create:
+                    os.fchmod(child, 0o700)
             except BaseException:
                 os.close(child)
                 raise
@@ -250,31 +243,49 @@ def prepare_private_directories(root: Path, descendants: list[Path]) -> None:
     for descendant in descendants:
         parts = _relative_parts(descendant)
         if os.name == "posix":
-            _secure_posix_descendant(root, parts)
+            _posix_descendant(root, parts, create=True)
         else:
             _secure_windows_descendant(root, parts)
 
-
-def _validate_posix_descendant(root: Path, parts: tuple[str, ...]) -> None:
+def _advise_posix_descendant(root: Path, parts: tuple[str, ...]) -> None:
     flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(root, flags)
     try:
+        descriptor = os.open(root, flags)
+    except OSError:
+        print(f"  {root}: could not be opened safely; permissions were not changed")
+        return
+    try:
+        root_mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
+        if root_mode & 0o022:
+            print(f"  {root}: is writable by other users (mode {root_mode:04o}); permissions were not changed")
+            return
+        current = root
         for part in parts:
+            current = current / part
             try:
-                child = os.open(part, flags, dir_fd=descriptor)
+                entry = os.lstat(part, dir_fd=descriptor)
             except FileNotFoundError:
                 return
-            info = os.fstat(child)
+            if stat.S_ISLNK(entry.st_mode):
+                print(f"  {current}: is a symlink; this installer will not follow it or change its permissions")
+                return
+            if not stat.S_ISDIR(entry.st_mode):
+                print(f"  {current}: is not a real directory; permissions were not changed")
+                return
+            if entry.st_uid != os.getuid():
+                print(f"  {current}: is owned by another user; permissions were not changed")
+                return
+            if stat.S_IMODE(entry.st_mode) & 0o022:
+                mode = stat.S_IMODE(entry.st_mode)
+                print(f"  {current}: is writable by other users (mode {mode:04o})")
+                print(f"  If you trust this path, restrict it and re-run: chmod 700 '{current}'")
+                return
             try:
-                if not stat.S_ISDIR(info.st_mode):
-                    raise GuardError("private path component is not a directory")
-                _check_owner(info)
-                if stat.S_IMODE(info.st_mode) & 0o022:
-                    raise GuardError("private path component is writable by another user")
-            except BaseException:
-                os.close(child)
-                raise
+                child = os.open(part, flags, dir_fd=descriptor)
+            except OSError:
+                print(f"  {current}: could not be opened safely; permissions were not changed")
+                return
             os.close(descriptor)
             descriptor = child
     finally:
@@ -295,10 +306,16 @@ def validate_private_directories(root: Path, descendants: list[Path]) -> None:
     for descendant in descendants:
         parts = _relative_parts(descendant)
         if os.name == "posix":
-            _validate_posix_descendant(root, parts)
+            _posix_descendant(root, parts, create=False)
         else:
             _validate_windows_descendant(root, parts)
 
+def advise_private_directories(root: Path, descendants: list[Path]) -> None:
+    for descendant in descendants:
+        if os.name == "posix":
+            _advise_posix_descendant(root, _relative_parts(descendant))
+        else:
+            print(f"  {root / descendant}: failed validation; permissions were not changed")
 
 def _validate_venv_tree(generation: Path) -> None:
     count = 0
@@ -322,14 +339,11 @@ def _validate_venv_tree(generation: Path) -> None:
             ):
                 raise GuardError("Python environment contains a writable entry")
 
-
 def _raise_walk_error(error: OSError) -> None:
     raise GuardError("Python environment could not be inspected") from error
 
-
 def _normalized_path(path: Path) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
-
 
 def _validate_generation_location(root: Path, generation: Path) -> tuple[Path, Path]:
     normalized_root = _normalized_path(root)
@@ -340,13 +354,11 @@ def _validate_generation_location(root: Path, generation: Path) -> tuple[Path, P
         raise GuardError("generation name is invalid")
     return normalized_root, normalized_generation
 
-
 def _validate_generation_entry(path: Path, info: os.stat_result) -> None:
     if not stat.S_ISDIR(info.st_mode) or _is_link_or_reparse(path, info):
         raise GuardError("generation path is not a real directory")
     _check_owner(info)
     _validate_windows_path(path, directory=True)
-
 
 def _generation_entries(root: Path) -> list[tuple[Path, os.stat_result]]:
     entries: list[tuple[Path, os.stat_result]] = []
@@ -371,14 +383,12 @@ def _generation_entries(root: Path) -> list[tuple[Path, os.stat_result]]:
             entries.append((path, info))
     return entries
 
-
 def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
     return (left.st_dev, left.st_ino, stat.S_IFMT(left.st_mode)) == (
         right.st_dev,
         right.st_ino,
         stat.S_IFMT(right.st_mode),
     )
-
 
 def _revalidate_generation(path: Path, expected: os.stat_result) -> None:
     try:
@@ -389,7 +399,6 @@ def _revalidate_generation(path: Path, expected: os.stat_result) -> None:
     if not _same_identity(expected, current):
         raise GuardError("generation changed during validation")
     _validate_venv_tree(path)
-
 
 def _remove_generations(entries: list[tuple[Path, os.stat_result]]) -> None:
     if os.name == "posix" and not shutil.rmtree.avoids_symlink_attacks:
@@ -403,7 +412,6 @@ def _remove_generations(entries: list[tuple[Path, os.stat_result]]) -> None:
         except OSError as exc:
             raise GuardError("generation could not be removed") from exc
 
-
 def delete_generation(root: Path, generation: Path) -> None:
     normalized_root, normalized_generation = _validate_generation_location(
         root, generation
@@ -416,7 +424,6 @@ def delete_generation(root: Path, generation: Path) -> None:
     if len(matches) != 1:
         raise GuardError("generation is unavailable")
     _remove_generations(matches)
-
 
 def prune_generations(root: Path, current: Path) -> None:
     normalized_root, normalized_current = _validate_generation_location(root, current)
@@ -432,7 +439,6 @@ def prune_generations(root: Path, current: Path) -> None:
     keep = {normalized_current, *(path for path, _info in previous[:1])}
     removals = [entry for entry in entries if entry[0] not in keep]
     _remove_generations(removals)
-
 
 def validate_venv_python(generation: Path, candidate: Path) -> None:
     secure_directory(generation, create=False)
@@ -459,13 +465,9 @@ def validate_venv_python(generation: Path, candidate: Path) -> None:
     writable_by_others = not _is_windows() and stat.S_IMODE(info.st_mode) & 0o022
     if writable_by_others or not os.access(target, os.X_OK):
         raise GuardError("Python candidate target is writable or not executable")
-
-
 def _apply_all(function: Callable[[Path], None], values: list[Path]) -> None:
     for value in values:
         function(value)
-
-
 _ACTIONS = {
     "prepare-dirs": (1, None, lambda v: _apply_all(secure_directory, v)),
     "secure-files": (1, None, lambda v: _apply_all(secure_file, v)),
@@ -473,14 +475,13 @@ _ACTIONS = {
     "write-exclusive": (1, 1, lambda v: write_exclusive(v[0])),
     "prepare-private-dirs": (2, None, lambda v: prepare_private_directories(v[0], v[1:])),
     "validate-private-dirs": (2, None, lambda v: validate_private_directories(v[0], v[1:])),
+    "advise-private-dirs": (2, None, lambda v: advise_private_directories(v[0], v[1:])),
     "helper-current": (3, 3, lambda v: installer_asset_guard.compare_current(str(v[0]), v[1], v[2])),
     "helper-published": (2, 2, lambda v: installer_asset_guard.verify_published(str(v[0]), v[1])),
     "validate-venv": (2, 2, lambda v: validate_venv_python(v[0], v[1])),
     "delete-generation": (2, 2, lambda v: delete_generation(v[0], v[1])),
     "prune-generations": (2, 2, lambda v: prune_generations(v[0], v[1])),
 }
-
-
 def main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1] not in _ACTIONS:
         raise GuardError("missing or invalid guard action")
@@ -490,7 +491,6 @@ def main(argv: list[str]) -> int:
         raise GuardError("invalid guard action arguments")
     handler(values)
     return 0
-
 
 if __name__ == "__main__":
     try:

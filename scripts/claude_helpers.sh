@@ -45,7 +45,7 @@ restore_quarantined_asset() {
     local quarantined="$1" dst="$2"
     mv -n -- "$quarantined" "$dst" 2>/dev/null || true
     if [ -e "$quarantined" ] || [ -L "$quarantined" ]; then
-        echo "warning: 竞态资产已保留在 $quarantined；未删除任何内容。" >&2
+        echo "warning: the raced asset was preserved at $quarantined; nothing was deleted." >&2
         return 1
     fi
 }
@@ -77,7 +77,7 @@ rollback_helper_transaction() {
         rmdir "$HELPER_TX_QUARANTINE" 2>/dev/null || true
         clear_helper_transaction
     else
-        echo "warning: helper 发布恢复不完整；旧资产保留在 $HELPER_TX_QUARANTINE" >&2
+        echo "warning: helper publish recovery is incomplete; the old asset is preserved at $HELPER_TX_QUARANTINE" >&2
     fi
     return "$failed"
 }
@@ -95,18 +95,18 @@ commit_helper_transaction() {
     local quarantine="$HELPER_TX_QUARANTINE"
     clear_helper_transaction
     rm -rf -- "$quarantine" 2>/dev/null \
-        || echo "warning: 旧 helper quarantine 清理失败: $quarantine" >&2
+        || echo "warning: failed to clean up the old helper quarantine: $quarantine" >&2
 }
 
 publish_helper_link() {
     local label="$1" src="$2" target="$3" dst="$4" quarantine quarantined
     if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
         ln -s "$target" "$dst" 2>/dev/null && return 0
-        echo "warning: $dst 出现竞态或平台不支持安全 symlink；已保留原状态。" >&2
+        echo "warning: $dst raced or the platform does not support a safe symlink; the original state was preserved." >&2
         return 1
     fi
     if ! asset_is_owned "$label" "$src" "$dst"; then
-        echo "warning: $dst 已存在且不属于此安装器；已保留。" >&2
+        echo "warning: $dst already exists and is not owned by this installer; it was preserved." >&2
         return 1
     fi
     quarantine="$(mktemp -d "${dst}.deepseek-mcp.XXXXXX")" || return 1
@@ -118,20 +118,63 @@ publish_helper_link() {
     if ! mv -n -- "$dst" "$quarantined" 2>/dev/null \
         || [ -e "$dst" ] || [ -L "$dst" ]; then
         rollback_helper_transaction || true
-        echo "warning: $dst 在 helper 切换时发生变化；已保留。" >&2
+        echo "warning: $dst changed during the helper switch; it was preserved." >&2
         return 1
     fi
     if ! asset_is_owned "$label" "$src" "$quarantined"; then
         rollback_helper_transaction || true
-        echo "warning: $dst 的所有权在切换时变化；已拒绝覆盖。" >&2
+        echo "warning: $dst ownership changed during the switch; overwrite refused." >&2
         return 1
     fi
     if ! ln -s "$target" "$dst" 2>/dev/null; then
         rollback_helper_transaction || true
-        echo "warning: 无法安全发布 $dst；已恢复旧资产。" >&2
+        echo "warning: could not safely publish $dst; the old asset was restored." >&2
         return 1
     fi
     commit_helper_transaction
+    return 0
+}
+
+publish_helper_file() {
+    local label="$1" src="$2" target="$3" dst="$4" quarantine quarantined staged
+    if [ -e "$dst" ] || [ -L "$dst" ]; then
+        if ! asset_is_owned "$label" "$src" "$dst"; then
+            echo "warning: $dst already exists and is not owned by this installer; it was preserved." >&2
+            return 1
+        fi
+        quarantine="$(mktemp -d "${dst}.deepseek-mcp.XXXXXX")" || return 1
+        quarantined="$quarantine/asset"
+        if ! begin_helper_transaction "$quarantine" "$quarantined" "$dst" "$target"; then
+            rmdir "$quarantine" 2>/dev/null || true
+            return 1
+        fi
+        if ! mv -n -- "$dst" "$quarantined" 2>/dev/null \
+            || [ -e "$dst" ] || [ -L "$dst" ]; then
+            rollback_helper_transaction || true
+            echo "warning: $dst changed during the helper switch; it was preserved." >&2
+            return 1
+        fi
+        if ! asset_is_owned "$label" "$src" "$quarantined"; then
+            rollback_helper_transaction || true
+            echo "warning: $dst ownership changed during the switch; overwrite refused." >&2
+            return 1
+        fi
+    fi
+    staged="$dst.deepseek-mcp.$$"
+    if ! ( umask 077 && cp -- "$target" "$staged" ) 2>/dev/null \
+        || ! cmp -s -- "$target" "$staged" 2>/dev/null \
+        || ! mv -n -- "$staged" "$dst" 2>/dev/null \
+        || [ -e "$staged" ] || [ -L "$staged" ] \
+        || [ ! -f "$dst" ] || [ -L "$dst" ] \
+        || ! cmp -s -- "$target" "$dst" 2>/dev/null; then
+        rm -f -- "$staged" 2>/dev/null || true
+        rollback_helper_transaction || true
+        echo "warning: could not safely publish $dst; the original state was preserved." >&2
+        return 1
+    fi
+    if [ "$HELPER_TRANSACTION" -eq 1 ]; then
+        commit_helper_transaction
+    fi
     return 0
 }
 
@@ -140,7 +183,7 @@ cleanup_helper_generation() {
     if [ -e "$HELPER_GENERATION" ] \
         && ! $PYTHON_CMD "$PATH_GUARD" delete-generation \
             "$HELPER_ROOT" "$HELPER_GENERATION"; then
-        echo "warning: 无法清理未完成的 helper generation: $HELPER_GENERATION" >&2
+        echo "warning: could not clean up the incomplete helper generation: $HELPER_GENERATION" >&2
         return 1
     fi
     HELPER_GENERATION=""
@@ -168,37 +211,71 @@ stage_helper_generation() {
     fi
 }
 
+prepare_helper_directory() {
+    local label="$1" relative="$2"
+    if $PYTHON_CMD "$PATH_GUARD" prepare-private-dirs "$HOME" \
+        ".claude" "$relative" >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "warning: could not secure the Claude $label path $HOME/$relative; this helper was not deployed." >&2
+    $PYTHON_CMD "$PATH_GUARD" advise-private-dirs "$HOME" ".claude" "$relative" >&2 || true
+    return 1
+}
+
 deploy_claude_helpers() {
     HELPER_WARNINGS=0
-    echo "[helper] 部署受保护的 skill 和 slash command copy..."
+    echo "[helper] Deploying protected skill and slash command copies..."
     if [ -L "$PROJECT_ROOT/skills/delegate-to-deepseek/SKILL.md" ] \
-        || [ -L "$PROJECT_ROOT/commands/ds.md" ] \
-        || ! $PYTHON_CMD "$PATH_GUARD" prepare-private-dirs "$HOME" \
-            ".claude" ".claude/skills" ".claude/commands" \
-        || ! stage_helper_generation; then
-        echo "warning: 无法安全创建 Claude helper generation；核心 MCP 仍可用。" >&2
+        || [ -L "$PROJECT_ROOT/commands/ds.md" ]; then
+        echo "warning: a helper source asset is a symlink; nothing was deployed." >&2
+        HELPER_WARNINGS=1
+        return 0
+    fi
+    SKILL_READY=0 COMMAND_READY=0
+    if prepare_helper_directory "skill" ".claude/skills"; then
+        SKILL_READY=1
+    else
+        HELPER_WARNINGS=1
+    fi
+    if prepare_helper_directory "command" ".claude/commands"; then
+        COMMAND_READY=1
+    else
+        HELPER_WARNINGS=1
+    fi
+    if [ "$SKILL_READY" -ne 1 ] && [ "$COMMAND_READY" -ne 1 ]; then
+        echo "warning: none of the Claude helper paths could be secured; check the guidance above." >&2
+        return 0
+    fi
+    if ! stage_helper_generation; then
+        echo "warning: could not safely create the Claude helper generation; the core MCP is still usable." >&2
         HELPER_WARNINGS=1
         return 0
     fi
     SKILL_PUBLISHED=0 COMMAND_PUBLISHED=0
-    if publish_helper_link skill "$PROJECT_ROOT/skills/delegate-to-deepseek" \
-        "$HELPER_GENERATION/skill" "$CLAUDE_SKILLS/delegate-to-deepseek"; then
-        SKILL_PUBLISHED=1
-    else
-        HELPER_WARNINGS=1
-        [ "$HELPER_TRANSACTION" -eq 0 ] || return 0
+    if [ "$SKILL_READY" -eq 1 ]; then
+        if publish_helper_link skill "$PROJECT_ROOT/skills/delegate-to-deepseek" \
+            "$HELPER_GENERATION/skill" "$CLAUDE_SKILLS/delegate-to-deepseek"; then
+            SKILL_PUBLISHED=1
+        else
+            HELPER_WARNINGS=1
+            [ "$HELPER_TRANSACTION" -eq 0 ] || return 0
+        fi
     fi
-    if publish_helper_link command "$PROJECT_ROOT/commands/ds.md" \
-        "$HELPER_GENERATION/ds.md" "$CLAUDE_COMMANDS/ds.md"; then
-        COMMAND_PUBLISHED=1
-    else
-        HELPER_WARNINGS=1
+    if [ "$COMMAND_READY" -eq 1 ]; then
+        if publish_helper_file command "$PROJECT_ROOT/commands/ds.md" \
+            "$HELPER_GENERATION/ds.md" "$CLAUDE_COMMANDS/ds.md"; then
+            COMMAND_PUBLISHED=1
+        else
+            HELPER_WARNINGS=1
+            [ "$HELPER_TRANSACTION" -eq 0 ] || return 0
+        fi
     fi
-    if [ "$SKILL_PUBLISHED" -ne 1 ] || [ "$COMMAND_PUBLISHED" -ne 1 ]; then
-        echo "warning: helper 未完整切换；为避免断开旧引用，保留全部 generation。" >&2
+    if [ "$SKILL_READY" -ne 1 ] || [ "$COMMAND_READY" -ne 1 ] \
+        || [ "$SKILL_PUBLISHED" -ne 1 ] || [ "$COMMAND_PUBLISHED" -ne 1 ]; then
+        echo "warning: helper switch did not complete; keeping all generations to avoid breaking old references." >&2
     elif ! $PYTHON_CMD "$PATH_GUARD" prune-generations \
         "$HELPER_ROOT" "$HELPER_GENERATION"; then
-        echo "warning: 旧 helper generation 清理失败；已保留。" >&2
+        echo "warning: failed to clean up the old helper generation; it was preserved." >&2
         HELPER_WARNINGS=1
     fi
     return 0

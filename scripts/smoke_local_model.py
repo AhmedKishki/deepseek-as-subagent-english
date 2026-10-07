@@ -31,7 +31,7 @@ def main() -> None:
         config = Config(
             api_key=_load_api_key({}, args.base_url), workspace=workspace,
             base_url=args.base_url, model=args.model,
-            flash_model=args.model, pro_model=args.model,
+            reasoning_effort="provider-default",
             max_output_tokens=args.max_output_tokens,
             max_turns=10, max_run_seconds=180,
             allowed_tools=["Read", "Edit", "Bash"],

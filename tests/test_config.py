@@ -340,6 +340,7 @@ class ConfigTests(unittest.TestCase):
                     "workspace": tmpdir,
                     "allowed_tools": ["Read"],
                     "base_url": "http://[::1]:8080/v1",
+                    # Deprecated Flash/Pro keys remain accepted for migration.
                     "flash": "qwen3.8-27b-q3",
                     "pro": "unsloth/Qwen...",
                     "flash_reasoning_effort": "provider-default",
@@ -347,8 +348,7 @@ class ConfigTests(unittest.TestCase):
                 "local-no-auth",
             )
 
-        self.assertEqual(config.flash_model, "qwen3.8-27b-q3")
-        self.assertEqual(config.pro_model, "unsloth/Qwen...")
+        self.assertEqual(config.model, "qwen3.8-27b-q3")
         self.assertEqual(config.reasoning_effort, "provider-default")
 
     def test_local_output_limit_is_configurable_and_bounded(self) -> None:

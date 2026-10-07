@@ -1,125 +1,137 @@
 ---
 name: delegate-to-deepseek
-description: 默认把中等及以下、批量、重复或机械任务作为完整逻辑单元派给 DeepSeek，并由主 Agent 独立验收。适用于批量改文件、扫日志、翻译、ETL、脚本、测试、文档、CRUD、单领域重构、单组件或单 endpoint。主 Agent 可基于上下文和失败代价调整派工策略；用户显式指令、安全、权限、隐私边界和派工后验证不可突破。DEEPSEEK_MODE=off 时跳过。
+description: Delegate medium-or-lower, batch, repetitive, or mechanical tasks to DeepSeek as complete logical units by default, with the main Agent verifying independently. Applies to batch file edits, log scanning, translation, ETL, scripts, tests, docs, CRUD, single-domain refactors, single components, or single endpoints. The main Agent may adjust the delegation policy based on context and cost of failure; explicit user instructions, and the security, permission, privacy, and post-delegation verification boundaries are inviolable. Skipped when DEEPSEEK_MODE=off.
 ---
 
-# delegate-to-deepseek — 主 Agent 派工准则
+# delegate-to-deepseek — Main Agent delegation guidelines
 
-“主 Agent”指负责决策、整合与最终验收的上层 agent。
+The "main Agent" is the upper-layer agent responsible for decisions, integration, and final acceptance.
 
-## 1. 不可突破的边界
+Use English for orchestrator-facing instructions, summaries, status explanations, and results. Tell the subagent to communicate in English while preserving source quotations, identifiers, and the language required for task deliverables.
 
-- 用户显式要求派 / 不派、指定执行者或执行方式时，优先服从用户。
-- 权限、安全、隐私、敏感信息和非授权写入边界不可绕过。
-- `DEEPSEEK_MODE=off` 时不要派工。
-- DeepSeek 读取的文件内容会发送到配置的 API endpoint；敏感工作区不得派工。
-- coding 能力固定为 Read / Write / Edit / Bash / Glob / Grep / NotebookEdit；readonly 固定为 Read / Glob / Grep。不得通过 task、steering 或其它参数提权。
-- coding Bash 是受边界约束的 trusted-host Bash，不是操作系统级沙箱。
-- 派工结果必须由主 Agent 独立验证，失败由主 Agent 收口。
-- 出现文件 mutation、取消、断连或 MCP 重启后，先调用 `get_deepseek_recovery()`，核验实际文件，再用精确 transaction IDs 调用 `acknowledge_deepseek_mutations(...)`；未确认前不要重试 mutation delegation。
+## 1. Inviolable boundaries
 
-## 2. API 选择
+- When the user explicitly requires delegation / no delegation, or names the executor or execution method, obey the user.
+- Permission, security, privacy, sensitive-information, and unauthorized-write boundaries must not be bypassed.
+- Do not delegate when `DEEPSEEK_MODE=off`.
+- File content that DeepSeek reads is sent to the configured API endpoint; do not delegate in sensitive workspaces.
+- coding capability is fixed to Read / Write / Edit / Bash / Glob / Grep / NotebookEdit; readonly is fixed to Read / Glob / Grep. Do not escalate privileges through task, steering, or any other parameter.
+- coding Bash is boundary-constrained trusted-host Bash, not an OS-level sandbox.
+- Delegated results must be verified independently by the main Agent, and the main Agent closes out failures.
+- The model and reasoning depth come from the user's configuration only; the main Agent must not override either.
+- After a file mutation, cancellation, disconnect, or MCP restart, first call `get_deepseek_recovery()`, verify the actual files, then call `acknowledge_deepseek_mutations(...)` with the exact transaction IDs; do not retry a mutation delegation before acknowledging.
 
-| 需求 | API |
+## 2. API selection
+
+| Need | API |
 |---|---|
-| coding，直接等结果 | `delegate_to_deepseek(task, context="", model="flash")` |
-| 纯静态文件分析，直接等结果 | `delegate_to_deepseek_readonly(task, context="", model="flash")` |
-| coding，需要 steering / status / cancel | `start_deepseek(task, context="", model="flash")` |
-| readonly，需要 steering / status / cancel | `start_deepseek_readonly(task, context="", model="flash")` |
-| 查询后台任务 | `get_deepseek_status(job_id)` |
-| 追加/修正后台指令 | `send_deepseek_message(job_id, message)` |
-| 取消后台任务 | `cancel_deepseek(job_id)` |
-| 获取最终结果 | `get_deepseek_result(job_id)` |
-| 查询 mutation recovery | `get_deepseek_recovery()` |
-| 确认已核验 mutation | `acknowledge_deepseek_mutations(transaction_ids)` |
+| coding, wait for the result directly | `delegate_to_deepseek(task, context="")` |
+| pure static file analysis, wait for the result directly | `delegate_to_deepseek_readonly(task, context="")` |
+| coding, needs steering / status / cancel | `start_deepseek(task, context="")` |
+| readonly, needs steering / status / cancel | `start_deepseek_readonly(task, context="")` |
+| query a background job | `get_deepseek_status(job_id)` |
+| append / correct a background instruction | `send_deepseek_message(job_id, message)` |
+| cancel a background job | `cancel_deepseek(job_id)` |
+| get the final result | `get_deepseek_result(job_id)` |
+| query mutation recovery | `get_deepseek_recovery()` |
+| acknowledge a verified mutation | `acknowledge_deepseek_mutations(transaction_ids)` |
 
-只读、搜索、review 已存在文件且整个任务不执行命令/写文件时用 readonly；其余或不确定时用 coding。readonly job 后续需要 Bash 或写文件时，结束/取消后重新启动 coding job，不能 steering 提权。
+Use readonly when the task only reads, searches, or reviews existing files and never runs commands or writes files; otherwise, or when uncertain, use coding. If a readonly job later needs Bash or file writes, end/cancel it and start a new coding job — steering cannot escalate privileges.
 
-## 3. 模型路由
+## 3. Model and reasoning configuration
 
-`model` 只允许 `flash` 或 `pro`；不传时使用 `flash`。
+The model and reasoning depth are user configuration only, never an orchestrator choice. They come from the user's `~/.deepseek-mcp/config.json` (`model`, `reasoning_effort`) or the `DEEPSEEK_MODEL` / `DEEPSEEK_REASONING_EFFORT` environment fallbacks, resolved at load time.
 
-- **Flash**：默认通用子代理，约 **Sonnet / Terra 档**。用于正常 coding、review、调查、重构、测试、批处理和常规多文件任务。
-- **Pro**：困难任务子代理，约 **Opus / Sol 档**。用于复杂 debugging、架构级推理、困难多文件推理，或 Flash 已明显不足后的升级。
-- 没有明确困难信号时保持 Flash；不要因为 Pro 可用就默认 Pro。
-- 主 Agent 只选择 `flash/pro`，不要尝试控制 reasoning effort；thinking 档位由用户配置决定。
-- background job 启动时冻结模型、reasoning effort 与能力。需要换模型时结束/取消当前 job，再新建 job。
+- The delegation tools expose no model or reasoning parameter; the main Agent must not pass, guess, or attempt to override either.
+- Do not edit the user's config or environment to influence routing.
+- A background job freezes the configured model, reasoning effort, and capabilities at start. To use a different one, the user changes the configuration and you end/cancel the current job and start a new one.
 
-## 4. 默认派工策略
+## 4. Default delegation policy
 
-**默认派给 Flash：**
+**Delegate by default:**
 
-- 脚本、测试、文档、CRUD、单组件 / 单 endpoint
-- 批量修改、重命名、翻译、提取、ETL、日志扫描
-- spec 清晰的 feature
-- 单领域重构、常规多文件任务
-- 静态代码/日志调查（优先 readonly）
+- Scripts, tests, docs, CRUD, single component / single endpoint
+- Batch edits, renames, translation, extraction, ETL, log scanning
+- Features with a clear spec
+- Single-domain refactors, routine multi-file tasks
+- Static code/log investigation (prefer readonly)
 
-**默认由主 Agent 自己处理：**
+**Handle by the main Agent itself by default:**
 
-- 用户明确要求自己处理
-- 极小改动：几乎无需读上下文即可完成的 typo / 单变量 rename / 少量注释
-- 跨领域架构设计、技术选型、ADR
-- 结论高度不明确、需要大量主 Agent 综合上下文的根因分析
-- 强依赖主 Agent 私有记忆、CLAUDE.md 或未提供给 DeepSeek 的项目约定
+- The user explicitly asks the main Agent to handle it
+- Tiny changes: a typo / single-variable rename / a few comments that need almost no context reading
+- Cross-domain architecture design, technology selection, ADRs
+- Root-cause analysis whose conclusion is highly uncertain and requires substantial main-Agent context synthesis
+- Cases that depend heavily on the main Agent's private memory, CLAUDE.md, or project conventions not supplied to DeepSeek
 
-这些是成本优化启发式，不是绝对限制。主 Agent 对任务边界、失败代价和验证手段有高把握时，可以调整；但不可突破第 1 节的边界。
+These are cost-optimization heuristics, not absolute limits. The main Agent may adjust them when it has high confidence about task boundaries, cost of failure, and verification methods; but the boundaries in section 1 are inviolable.
 
-## 5. 派工时机
+## 5. When to delegate
 
-尽量在主 Agent 大量读取项目源码之前决定是否派工，避免主 Agent 和 DeepSeek 重复加载同一批上下文。
+Decide whether to delegate before the main Agent reads large amounts of project source, to avoid the main Agent and DeepSeek both loading the same context.
 
-派工决策前优先使用 Glob / LS / 目录树、只读 Bash（如 `ls`、`find`、`wc -l`、`git status`）和必要的外部 WebSearch / WebFetch。避免仅为了决定“要不要派”而先 Read/Grep 大量源码；若主 Agent 已经拥有相关上下文，直接利用即可。
+Before deciding to delegate, prefer Glob / LS / directory trees, read-only Bash (such as `ls`, `find`, `wc -l`, `git status`), and external WebSearch / WebFetch when necessary. Avoid Read/Grep over large amounts of source just to decide "whether to delegate"; if the main Agent already has the relevant context, use it directly.
 
-## 6. 派工粒度
+## 6. Delegation granularity
 
-优先派**完整逻辑单元**，不要把一个 feature 拆成大量微任务。合适的单元应尽量满足：目标清晰、输入/输出边界明确、可独立验证、所需 context 能一次性给齐。
+Give **each subagent one clear, distinct job** with one outcome, explicit scope, and independent acceptance criteria. Do not bundle unrelated jobs into a single delegation. Reading, implementing, and testing the same change are sequential steps of one job, not separate unrelated assignments.
 
-主 Agent 负责识别单元、定义接口和最终整合；DeepSeek 负责单元内部的 Read / Implement / Test 循环。如果子任务必须频繁回来询问主 Agent 或依赖前一个子任务的临时结果，通常应合并。
+The purpose of splitting work is parallelism: identify independent jobs, assign non-overlapping file ownership and interfaces, and run them concurrently where the execution boundary permits. The main Agent coordinates dependencies and integrates results; a subagent must not take over another subagent's job.
 
-## 7. task / context 怎么写
+This server currently allows only one execution per canonical workspace. Parallel calls against that same workspace are rejected, even for read-only jobs. Use separate workspaces or worktrees with separate server instances for safe parallel execution; otherwise keep jobs distinct and run them sequentially. Never bypass the workspace lease to obtain parallelism.
 
-DeepSeek 看不到主对话历史、主 Agent 私有记忆或未显式提供的项目约定。调用时给足完成任务所需的信息，但不要放 API key、凭证或不应发送到外部 API 的敏感数据。
+## 7. How to write task / context
 
-`task` 至少写清：目标、范围/路径（已知时）、边界、可验证成功标准。
+DeepSeek cannot see the main conversation history, the main Agent's private memory, or project conventions not explicitly supplied. Provide enough information to complete the task, but never include API keys, credentials, or sensitive data that must not be sent to an external API.
 
-`context` 只补必要信息：技术栈/版本、命名/schema/接口约定、已知项目规则、外部文档关键结论、已知坑或失败现象。
+Give very clear, numbered, sequential instructions. Do not assume the subagent will infer the order of operations, missing context, or job boundaries.
 
-普通任务省略 `model`；困难任务明确升级：
+`task` must state:
+
+1. One job and its concrete outcome.
+2. Owned files/paths, inputs, and explicit exclusions, including other agents' work.
+3. The steps to perform in order, with any dependencies or stop conditions.
+4. Constraints, required validation commands, and verifiable acceptance criteria.
+5. The expected return format: changes/findings, validation evidence, and blockers.
+
+`context` should add only necessary information: tech stack/versions, naming/schema/interface conventions, known project rules, key conclusions from external docs, and known pitfalls or failure symptoms.
+
+Call the tool with `task` and `context`; the user's configuration selects the model and reasoning depth:
 
 ```text
 mcp__deepseek__delegate_to_deepseek(
-  task="<目标 + 范围 + 成功标准>",
-  context="<必要上下文>",
-  model="pro"  # 普通任务删除此行，默认 Flash
+  task="<goal + scope + success criteria>",
+  context="<necessary context>"
 )
 ```
 
-## 8. 外部知识 pre-flight
+Never pass a model or reasoning override — the tools do not accept one.
 
-DeepSeek 没有 web 工具。任务依赖最新或不熟悉的框架/API、小众依赖、协议/spec、SaaS API、错误码或 breaking change 时，主 Agent 先查官方/可靠资料，把**摘要**放进 `context` 再派工。常识性内容无需额外搜索。
+## 8. External-knowledge pre-flight
 
-## 9. 派工后验收
+DeepSeek has no web tools. When a task depends on the latest or unfamiliar frameworks/APIs, niche dependencies, protocols/specs, SaaS APIs, error codes, or breaking changes, the main Agent should first consult official/reliable sources and put a **summary** into `context` before delegating. Common knowledge needs no extra search.
 
-DeepSeek 自报完成不等于完成。主 Agent 至少：
+## 9. Post-delegation acceptance
 
-1. 查看关键 diff / 产物。
-2. 检查 schema、接口、边界和数量级。
-3. 能运行测试/静态检查时运行。
-4. mutation 任务按 recovery 协议核验并 acknowledge。
+DeepSeek reporting completion is not completion. The main Agent must at least:
 
-小问题主 Agent 直接修；明显遗漏但仍适合委派时给明确反馈重试；Flash 能力不足可新建 Pro 任务；大范围错误、权限问题或连续失败则停止派工并接管。
+1. Review the key diff / artifacts.
+2. Check the schema, interfaces, boundaries, and order of magnitude.
+3. Run tests/static checks when possible.
+4. For mutation tasks, verify per the recovery protocol and acknowledge.
 
-## 10. Fallback 与用户控制
+The main Agent fixes small issues directly; for clear omissions that are still suitable for delegation, give explicit feedback and retry; on broad errors, permission problems, or repeated failures, stop delegating and take over.
 
-| 情况 | 处理 |
+## 10. Fallback and user control
+
+| Situation | Handling |
 |---|---|
-| MCP / API 未配置或不可用 | 主 Agent 接管 |
-| capability/tool not allowed | 不绕过权限；接管或让 operator 调整配置 |
-| busy / workspace already owned | 处理现有 job 后再派，不并发写同一 workspace |
-| 超 max_turns / 任务过大 | 按独立逻辑单元拆分 |
-| Flash 质量不足 | 验证后新建 Pro 任务 |
-| 连续两次质量差 | 本会话停止主动派工 |
-| 用户说“派给 DS / DeepSeek”或 `/ds` | 强制派，默认 Flash；明显困难可 Pro |
-| 用户说“你自己干 / 别派” | 不派 |
-| `DEEPSEEK_MODE=off` / pure 模式 | 不派 |
+| MCP / API not configured or unavailable | main Agent takes over |
+| capability/tool not allowed | do not bypass permissions; take over or have the operator adjust configuration |
+| busy / workspace already owned | handle the existing job before delegating; do not write to the same workspace concurrently |
+| exceeded max_turns / task too large | split into independent logical units |
+| output quality insufficient | after verification, retry with explicit feedback, then take over |
+| two consecutive poor results | stop proactive delegation for this session |
+| user says "delegate to DS / DeepSeek" or `/ds` | force delegation using the user-configured model |
+| user says "do it yourself / don't delegate" | do not delegate |
+| `DEEPSEEK_MODE=off` / pure mode | do not delegate |

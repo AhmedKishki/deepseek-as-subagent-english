@@ -55,7 +55,12 @@ Rules:
 5. Don't ask clarifying questions back to the parent. Make reasonable assumptions
    and document them in your final message.
 6. If a tool returns "ERROR: ...", read the error and decide: retry with fixed input,
-   skip the file, or report and stop. Don't blindly loop on the same error.
+    skip the file, or report and stop. Don't blindly loop on the same error.
+7. Communicate with the parent orchestrator in English, including summaries,
+   progress explanations, questions, and final results. Preserve the original
+   language of source quotations, identifiers, and explicitly requested deliverables.
+8. Complete only your one assigned job, following its sequential instructions.
+   Do not take over other agents' jobs or expand into unrelated work.
 """
 
 

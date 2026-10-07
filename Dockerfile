@@ -7,7 +7,7 @@ FROM python:3.12-slim@sha256:7a8b475003c4fe15a2cd4e55e5cfc2f3560bdc9333d624f24cd
 
 WORKDIR /app
 
-# 缓存层：先 copy 元数据，下次代码改动时跳过装依赖
+# Cache layer: copy metadata first so dependency installs are skipped when only code changes
 COPY pyproject.toml ./
 COPY requirements.lock ./
 COPY README.md ./
@@ -28,7 +28,7 @@ ENV HOME=/home/deepseek \
     PYTHONUNBUFFERED=1
 USER 65532:65532
 
-# MCP server 走 stdio，无端口暴露
-# 没 DEEPSEEK_API_KEY 时 ping 返回 NOT_CONFIGURED 而非 crash —— 适合 Glama
-# introspection（仅启动 + 列工具，不实际派工）
+# The MCP server uses stdio, so no port is exposed
+# Without DEEPSEEK_API_KEY, ping returns NOT_CONFIGURED instead of crashing — suited to Glama
+# introspection (startup + tool listing only, no actual delegation)
 ENTRYPOINT ["deepseek-mcp"]

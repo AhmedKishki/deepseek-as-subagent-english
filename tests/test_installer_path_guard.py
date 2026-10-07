@@ -145,6 +145,41 @@ class InstallerPathGuardTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(stat_mode(claude), 0o770)
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode semantics")
+    def test_private_dir_advice_recommends_chmod_for_owned_writable_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            skills = home / ".claude" / "skills"
+            skills.mkdir(parents=True, mode=0o700)
+            home.chmod(0o700)
+            (home / ".claude").chmod(0o700)
+            skills.chmod(0o775)
+
+            result = _guard(
+                "advise-private-dirs", str(home), ".claude", ".claude/skills"
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            output = result.stdout.decode()
+            self.assertIn(f"chmod 700 '{skills}'", output)
+            self.assertEqual(stat_mode(skills), 0o775)
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink semantics")
+    def test_private_dir_advice_never_recommends_chmod_on_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            outside = Path(tmpdir) / "outside"
+            home.mkdir(mode=0o700)
+            outside.mkdir(mode=0o700)
+            (home / ".claude").symlink_to(outside, target_is_directory=True)
+
+            result = _guard("advise-private-dirs", str(home), ".claude")
+
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            output = result.stdout.decode()
+            self.assertIn("symlink", output)
+            self.assertNotIn("chmod", output)
+
     @unittest.skipIf(os.name == "nt", "POSIX descriptor semantics")
     def test_helper_regular_read_rejects_early_eof(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

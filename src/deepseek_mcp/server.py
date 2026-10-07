@@ -37,7 +37,6 @@ from .execution_profile import (
 )
 from .host_instructions import HOST_INSTRUCTIONS as _HOST_INSTRUCTIONS
 from .job_manager import DeepSeekJobManager, JobBusy, JobError, validate_delegation_input
-from .model_selection import ModelChoice, resolve_profile
 from .private_logging import PrivateBoundedLogStream
 from .process_hardening import disable_core_dumps
 from .transaction_recovery import (
@@ -184,8 +183,8 @@ def ping() -> str:
         ws_short = _shorten_path(cfg.workspace)
         tools = ",".join(cfg.allowed_tools)
         config_status = (
-            f"workspace={ws_short} (sandbox), flash={cfg.flash_model}/{cfg.flash_reasoning_effort}, "
-            f"pro={cfg.pro_model}/{cfg.pro_reasoning_effort}, tools={tools}"
+            f"workspace={ws_short} (sandbox), model={cfg.model}, "
+            f"reasoning_effort={cfg.reasoning_effort}, tools={tools}"
         )
     except Exception as e:
         config_status = f"NOT_CONFIGURED ({e})"
@@ -229,17 +228,16 @@ def _json(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def _load_config(profile: ExecutionProfile = CODING_PROFILE, model: ModelChoice = "flash") -> Config:
+def _load_config(profile: ExecutionProfile = CODING_PROFILE) -> Config:
+    """Load the user-owned model and reasoning depth bound to one capability.
+
+    The orchestrator never selects a model or reasoning depth; both come from
+    configuration, so this is the single runtime selection path.
+    """
     if _deepseek_mode() == "off":
         raise JobError("DeepSeek delegation is disabled (DEEPSEEK_MODE=off)")
     try:
-        config = configure_delegation(Config.load(), profile)
-        config.model, config.reasoning_effort = resolve_profile(
-            model, flash_model=config.flash_model, pro_model=config.pro_model,
-            flash_effort=config.flash_reasoning_effort,
-            pro_effort=config.pro_reasoning_effort,
-        )
-        return config
+        return configure_delegation(Config.load(), profile)
     except JobError:
         raise
     except Exception as e:
@@ -301,9 +299,9 @@ async def _run_sync_cancellable(full_task: str, config: Config) -> dict:
                 raise MutationOutcomeCancelled(message, tuple(records)) from None
         raise
 
-async def _delegate(task: str, context: str, profile: ExecutionProfile, model: ModelChoice) -> str:
+async def _delegate(task: str, context: str, profile: ExecutionProfile) -> str:
     try:
-        config, full_task = _prepare_sync_request(task, context, profile, model)
+        config, full_task = _prepare_sync_request(task, context, profile)
     except JobError as e:
         return str(e)
     try:
@@ -327,24 +325,24 @@ async def _delegate(task: str, context: str, profile: ExecutionProfile, model: M
     return _format_sync_result(result)
 
 @mcp.tool(annotations=_AGENT_EXECUTION)
-async def delegate_to_deepseek(task: str, context: str = "", model: ModelChoice = "flash") -> str:
-    """Run a full coding delegation; Flash is default, Pro is for hard tasks."""
-    return await _delegate(task, context, CODING_PROFILE, model)
+async def delegate_to_deepseek(task: str, context: str = "") -> str:
+    """Run a full coding delegation. The configured model and reasoning depth apply."""
+    return await _delegate(task, context, CODING_PROFILE)
 
 @mcp.tool(annotations=_READONLY_AGENT_EXECUTION)
-async def delegate_to_deepseek_readonly(task: str, context: str = "", model: ModelChoice = "flash") -> str:
-    """Run pure file analysis; Flash is default, Pro is for hard tasks."""
-    return await _delegate(task, context, READONLY_PROFILE, model)
+async def delegate_to_deepseek_readonly(task: str, context: str = "") -> str:
+    """Run pure file analysis. The configured model and reasoning depth apply."""
+    return await _delegate(task, context, READONLY_PROFILE)
 
 
-def _prepare_sync_request(task: str, context: str, profile: ExecutionProfile, model: ModelChoice = "flash") -> tuple[Config, str]:
+def _prepare_sync_request(task: str, context: str, profile: ExecutionProfile) -> tuple[Config, str]:
     if _deepseek_mode() == "off":
         raise JobError(
             "DeepSeek delegation is disabled (DEEPSEEK_MODE=off). "
             "Continue the task yourself in the main conversation."
         )
     try:
-        config = _load_config(profile, model)
+        config = _load_config(profile)
     except JobError:
         raise
     except Exception as error:
@@ -354,8 +352,10 @@ def _prepare_sync_request(task: str, context: str, profile: ExecutionProfile, mo
     except JobError as error:
         raise JobError(f"ERROR: invalid DeepSeek delegation input: {error}") from None
     logger.info(
-        "delegate_to_deepseek invoked. model=%s task length=%d, context length=%d",
-        model,
+        "delegate_to_deepseek invoked. model=%s reasoning_effort=%s "
+        "task length=%d, context length=%d",
+        config.model,
+        config.reasoning_effort,
         len(task),
         len(context),
     )
@@ -372,23 +372,23 @@ def _log_sync_completion(result: dict) -> None:
     )
 
 
-def _start_delegation(task: str, context: str, profile: ExecutionProfile, model: ModelChoice) -> str:
+def _start_delegation(task: str, context: str, profile: ExecutionProfile) -> str:
     try:
-        payload = job_manager.start(task, context, _load_config(profile, model))
+        payload = job_manager.start(task, context, _load_config(profile))
     except JobError as e:
         return _json({"ok": False, "error": str(e)})
-    logger.info("Background DeepSeek job started: %s model=%s", payload["job_id"], model)
+    logger.info("Background DeepSeek job started: %s", payload["job_id"])
     return _json({"ok": True, **payload})
 
 @mcp.tool(annotations=_AGENT_EXECUTION)
-def start_deepseek(task: str, context: str = "", model: ModelChoice = "flash") -> str:
-    """Start a coding job; Flash is default, Pro is for hard tasks."""
-    return _start_delegation(task, context, CODING_PROFILE, model)
+def start_deepseek(task: str, context: str = "") -> str:
+    """Start a coding job. The configured model and reasoning depth apply."""
+    return _start_delegation(task, context, CODING_PROFILE)
 
 @mcp.tool(annotations=_READONLY_AGENT_EXECUTION)
-def start_deepseek_readonly(task: str, context: str = "", model: ModelChoice = "flash") -> str:
-    """Start a read-only job; Flash is default, Pro is for hard tasks."""
-    return _start_delegation(task, context, READONLY_PROFILE, model)
+def start_deepseek_readonly(task: str, context: str = "") -> str:
+    """Start a read-only job. The configured model and reasoning depth apply."""
+    return _start_delegation(task, context, READONLY_PROFILE)
 
 @mcp.tool(annotations=_READ_ONLY)
 def get_deepseek_status(job_id: str) -> str:
