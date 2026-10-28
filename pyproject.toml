@@ -41,6 +41,7 @@ Issues = "https://github.com/AhmedKishki/deepseek-as-subagent-english/issues"
 
 [project.scripts]
 deepseek-mcp = "deepseek_mcp.server:main"
+deepseek-worktree = "deepseek_mcp.worktrees:main"
 
 [build-system]
 requires = ["hatchling>=1.25,<2"]

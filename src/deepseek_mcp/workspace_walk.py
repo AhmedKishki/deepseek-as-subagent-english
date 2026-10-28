@@ -174,7 +174,7 @@ class WorkspaceWalk:
             return None, None
         parts = (*parent.relative_parts, entry.name)
         path = parent.display_path / entry.name
-        if is_protected_host_path(path):
+        if is_protected_host_path(path, self.root):
             return None, None
         is_file, is_dir = stat.S_ISREG(info.st_mode), stat.S_ISDIR(info.st_mode)
         matched = self._matched_entry(path, parts, states, is_file, is_dir, info, parent)
@@ -284,7 +284,7 @@ def _resolve_base(base: str, workspace: Path) -> tuple[Path, Path, Path]:
         raise ToolInputError("path must stay within the workspace") from exc
     if os.name == "nt" and not all(windows_walk.safe_part(part) for part in relative.parts):
         raise ToolInputError("path contains an unsafe Windows component")
-    if is_protected_host_path(candidate):
+    if is_protected_host_path(candidate, root):
         raise ToolInputError("path targets protected host or VCS control state")
     return root, candidate, relative
 

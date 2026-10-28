@@ -11,6 +11,7 @@ _AUDITED_CHILDREN = frozenset(
     {
         "deepseek_mcp.provider_child",
         "deepseek_mcp.tool_child",
+        "deepseek_mcp.external_mcp_child",
     }
 )
 _BOOTSTRAP = (

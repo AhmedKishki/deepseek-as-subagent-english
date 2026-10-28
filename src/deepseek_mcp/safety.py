@@ -31,7 +31,29 @@ def is_agent_control_name(name: str) -> bool:
     return folded in _AGENT_CONTROL_DIRECTORY_NAMES or folded in _AGENT_CONTROL_FILE_NAMES
 
 
-def is_protected_host_path(path: Path) -> bool:
+def _is_worktree_control_path(candidate: Path, workspace: Path | None) -> bool:
+    name = ".deepseek-as-subagent"
+    if workspace is None:
+        parts = [part.casefold() for part in candidate.parts]
+        if name not in parts:
+            return False
+        position = len(parts) - 1 - parts[::-1].index(name)
+        suffix = parts[position + 1:]
+        if not suffix:
+            return True
+        instance = suffix[0]
+        return (len(instance) != 16 or not instance.startswith("run-")
+                or any(char not in "0123456789abcdef" for char in instance[4:]))
+    try:
+        relative = candidate.relative_to(workspace.resolve())
+    except ValueError:
+        return False
+    except (OSError, RuntimeError):
+        return True
+    return any(part.casefold() == name for part in relative.parts)
+
+
+def is_protected_host_path(path: Path, workspace: Path | None = None) -> bool:
     """Keep model file tools away from host agent/config and VCS control state."""
     try:
         candidate = path.resolve()
@@ -47,7 +69,8 @@ def is_protected_host_path(path: Path) -> bool:
         for part in candidate.parts
     ):
         return True
-    return candidate.name.casefold() in _AGENT_CONTROL_FILE_NAMES
+    return (_is_worktree_control_path(candidate, workspace)
+            or candidate.name.casefold() in _AGENT_CONTROL_FILE_NAMES)
 
 
 def is_unsafe_workspace_root(path: Path) -> bool:
@@ -82,7 +105,8 @@ DANGEROUS_TOKENS = {
 
 # Companion program names; reject if they appear anywhere in the token stream.
 DANGEROUS_ANYWHERE_TOKENS = {
-    "sudo", "su",
+    # Git belongs to the orchestrator, including reads; catch common wrappers.
+    "sudo", "su", "git", "git.exe",
 }
 
 # Complete-phrase matching (kept from the older style) for distinctive combinations.
@@ -171,7 +195,7 @@ def resolve_safe_path(rel_or_abs: str, workspace: Path) -> Path:
             f"Tools can only access files within the configured workspace."
         ) from e
 
-    if is_protected_host_path(abs_path):
+    if is_protected_host_path(abs_path, workspace):
         raise SandboxViolation("path targets protected host or VCS control state")
 
     return abs_path

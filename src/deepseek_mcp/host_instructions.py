@@ -77,7 +77,20 @@ instructions; do not bundle unrelated jobs into one delegation, and do not expec
 the subagent to infer order or boundaries. Reading, implementing, and testing the
 same change are sequential steps, not parallel jobs. True parallelism requires
 separate workspaces and MCP server instances; never bypass the
-one-execution-per-workspace lease.
+one-execution-per-workspace lease. Subagents never use Git, including read-only
+commands and Git MCP tools. The host alone inspects and manages repository state.
+For parallel editing, the host can create private branches/checkouts below
+`<workspace>/.deepseek-as-subagent/run-<random>/` (Git-ignored, not `/tmp`) with
+`deepseek-worktree create --repo PATH --base COMMIT`, then connect one separate
+MCP instance per returned manifest using `deepseek-worktree serve --manifest PATH`.
+Managed workers keep Bash and may implement tasks and run their own tests
+in their fixed checkout, but the server-injected policy tells them to
+stay inside their folder and branch and never touch shared Git state. The host
+reviews actual diffs, acknowledges recovery records and commits accepted files.
+Stop each connection before integrating with the host-only CLI. Integrate serially
+into a clean target with its expected HEAD; resolve retained conflicts and run
+combined tests before cleanup. Never ask the worker to switch branches or manage
+shared Git state.
 
 DeepSeek cannot see host chat or project instructions; pass needed context
 explicitly. One OS lease permits one DeepSeek execution per canonical workspace,

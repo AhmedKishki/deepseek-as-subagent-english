@@ -25,6 +25,7 @@ env/
 # Project
 ~/.deepseek-mcp/      # config directory is not committed
 .deepseek-mcp/
+/.deepseek-as-subagent/
 *.log
 .coverage
 htmlcov/

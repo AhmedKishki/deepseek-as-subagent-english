@@ -1,6 +1,6 @@
 # Future work
 
-The current single-subagent execution model is sufficient for now. These items are deferred, not implemented. Keep existing permissions, workspace leases, resource limits, and mutation recovery intact until a replacement is implemented and tested.
+The one-execution-per-workspace model is preserved. Independent worktrees run in separate server instances; shared-workspace concurrency and unchecked items below remain deferred. Keep existing permissions, workspace leases, resource limits, and mutation recovery intact until a replacement is implemented and tested.
 
 ## Concurrent subagents
 
@@ -27,6 +27,8 @@ Research baseline: [Kilo source at b1e7f34](https://github.com/Kilo-Org/kilocode
 
 ## Live observability and inspection
 
+- [ ] Add supported opt-in per-job JSONL diagnostic exports for inspection without live tracking. Append observable progress as it happens: ordered lifecycle events, tool-call attempts/outcomes, retries, errors, timings, budgets, cancellation, recovery, and worker summaries. Flush incrementally so interrupted runs remain inspectable; bound private file size and retention, mark dropped/incomplete events, and redact credentials. Raw prompts/commands/file contents/tool output require explicit capture permission. Do not add a permission-bypassing backdoor or promise hidden model reasoning; export observable evidence and summaries, not private internal chain-of-thought. Let the future dashboard consume the same events.
+- [ ] Provide one local dashboard listing every running subagent instance across separate MCP processes and worktrees. Show instance/job IDs, assigned checkout and branch, connection health, queued/running/completed/failed/cancelled state, elapsed time, and bounded recent activity. Use a shared discovery/heartbeat mechanism so process-local job registries do not hide sibling instances; mark crashed or disconnected instances stale. This UI is deferred, not implemented.
 - [ ] Design an opt-in local inspection service with a small browser UI and a bounded event stream. Let the user inspect a running DeepSeek job rather than seeing only its final answer. Evaluate an MCP-owned loopback HTTP service or a separate observer process; neither may create a second executor or bypass workspace leases.
 - [ ] Record server-observed lifecycle events with job IDs, ordered sequence numbers, timestamps, model/effort configuration, turns, tool categories, command exit/timeout outcomes, limits, retries, failures, and recovery state. Show elapsed time and remaining budgets so active work can be distinguished from a stalled run. Label provider-reported usage separately from host-observed facts.
 - [ ] Keep observable actions, worker messages, and server evidence distinct. Do not present worker claims as verified results, or promise access to hidden model reasoning. Link the live history to the final evidence receipt and show gaps, dropped events, and reconnect/retention limits explicitly.
@@ -36,5 +38,17 @@ Research baseline: [Kilo source at b1e7f34](https://github.com/Kilo-Org/kilocode
 
 ## External MCP servers
 
-- [ ] Add user-configured outbound MCP connections for the subagent, with explicit server/tool allowlists, credential isolation, bounded timeouts, cancellation, and lifecycle management.
-- [ ] Preserve read-only boundaries and define how remote side effects interact with permissions and concurrency. Do not assume external MCP tools participate in local file locks or mutation recovery.
+Read-only, opt-in outbound MCP connections are implemented: a separate private
+allowlist config, explicit server/tool selection, read-only annotation
+validation, credential isolation over private pipes, and a bounded cancellable
+per-call child. The following remain deferred.
+
+- [ ] Add an orchestrator-side gateway that routes selected calls through the
+  parent's existing MCP connections and preserves its permissions/approval flow,
+  without multiple clients independently consuming one stdio stream. Direct HTTP
+  endpoints may already proxy tools; parent-connection reuse is not implemented.
+- [ ] Add optional direct stdio transport with explicit process ownership and
+  lifecycle limits. It is not available yet.
+- [ ] Preserve read-only boundaries and define how remote side effects interact
+  with permissions and concurrency. Do not assume external MCP tools participate
+  in local file locks or mutation recovery.
